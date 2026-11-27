@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * Farhan Jawed - AI Agent | script.js
- * Smart Auto-Fallback Queue, Live OpenRouter Free Models, Vision/File & Markdown
+ * Smart Auto-Fallback Queue, Priority OpenRouter Free Models, Persona & Markdown
  * ============================================================================
  */
 
@@ -9,7 +9,7 @@
 
 document.addEventListener('DOMContentLoaded', () => {
   /* ==========================================================================
-     1. CONFIGURATION & ENDPOINTS
+     1. CONFIGURATION, PRIORITY MODELS & SYSTEM PERSONA
      ========================================================================== */
   const STORAGE_KEYS = {
     API_KEYS: 'fj_ai_api_keys',
@@ -30,6 +30,46 @@ document.addEventListener('DOMContentLoaded', () => {
     groq: 'https://api.groq.com/openai/v1/chat/completions'
   };
 
+  // Priority Order: OpenRouter ke sirf yeh 3 standard smart free models sabse pehle
+  const PREFERRED_OPENROUTER_FREE_MODELS = [
+    {
+      id: 'meta-llama/llama-3-8b-instruct:free',
+      name: 'Meta Llama 3 8B Instruct (Free)',
+      contextLength: 8192,
+      supportsImage: false
+    },
+    {
+      id: 'google/gemma-2-9b-it:free',
+      name: 'Google Gemma 2 9B IT (Free)',
+      contextLength: 8192,
+      supportsImage: false
+    },
+    {
+      id: 'qwen/qwen-2-7b-instruct:free',
+      name: 'Qwen 2 7B Instruct (Free)',
+      contextLength: 32768,
+      supportsImage: false
+    }
+  ];
+
+  // Weird / unreliable models jinhe auto-select list se block rakhna hai
+  const BLOCKED_MODEL_PATTERNS = [
+    'particle-ai',
+    'particle-1'
+  ];
+
+  // Reputable model families (agar top 3 fail hon toh secondary fallback mein inhe priority mile)
+  const TRUSTED_MODEL_PREFIXES = [
+    'meta-llama/',
+    'google/',
+    'qwen/',
+    'mistralai/',
+    'deepseek/',
+    'nvidia/',
+    'microsoft/',
+    'openai/'
+  ];
+
   // Queue ke aakhir mein fallback models (Google aur phir Groq)
   const FALLBACK_TAIL_MODELS = [
     {
@@ -48,9 +88,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   ];
 
+  // System Prompt (Persona) - har API request ke messages array mein sabse pehle
   const SYSTEM_PROMPT =
-    'You are Farhan Jawed AI, a helpful, intelligent, and friendly personal AI assistant. ' +
-    'Provide clear, accurate, well-structured responses using Markdown when helpful.';
+    'You are Farhan Jawed - AI Agent, a highly intelligent and helpful personal assistant created by Farhan Jawed. ' +
+    'Always respond professionally, accurately, and in the language the user speaks. ' +
+    'Do not roleplay or write poems unless explicitly asked.';
 
   const DEFAULT_SUGGESTIONS = [
     {
@@ -142,12 +184,13 @@ document.addEventListener('DOMContentLoaded', () => {
       groq: '',
       openrouter: ''
     },
-    modelMode: 'auto',          // 'auto' or 'providerId::modelId'
-    openRouterFreeModels: [],   // Fetched from OpenRouter /api/v1/models (price == 0)
+    modelMode: 'auto', // 'auto' or 'providerId::modelId'
+    // Start with the 3 preferred OpenRouter models right away
+    openRouterFreeModels: [...PREFERRED_OPENROUTER_FREE_MODELS],
     isFetchingModels: false,
     chats: [],
     activeChatId: null,
-    pendingAttachments: [],     // Array of { name, size, type, isImage, base64, textContent }
+    pendingAttachments: [], // Array of { name, size, type, isImage, base64, textContent }
     isGenerating: false,
     theme: 'dark'
   };
@@ -168,7 +211,7 @@ document.addEventListener('DOMContentLoaded', () => {
     bindEvents();
     updateInputUIState();
 
-    // App load hote hi OpenRouter se free models fetch karke memory mein save karo
+    // App load hote hi OpenRouter se additional free models fetch karo (top 3 ke baad fallback ke liye)
     fetchOpenRouterFreeModels();
   }
 
@@ -184,6 +227,17 @@ document.addEventListener('DOMContentLoaded', () => {
   /* ==========================================================================
      5. OPENROUTER FREE MODELS FETCH & SETTINGS DROPDOWN
      ========================================================================== */
+  function isBlockedModelId(modelId) {
+    const lower = String(modelId || '').toLowerCase();
+    return BLOCKED_MODEL_PATTERNS.some((pattern) => lower.includes(pattern));
+  }
+
+  function getModelTrustScore(modelId) {
+    const lower = String(modelId || '').toLowerCase();
+    const prefixMatch = TRUSTED_MODEL_PREFIXES.some((prefix) => lower.startsWith(prefix));
+    return prefixMatch ? 1 : 0;
+  }
+
   async function fetchOpenRouterFreeModels() {
     if (state.isFetchingModels) return;
     state.isFetchingModels = true;
@@ -204,10 +258,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const payload = await response.json();
       const allModels = Array.isArray(payload && payload.data) ? payload.data : [];
 
-      // Sirf wo models filter karo jinka prompt aur completion price "0" ho
-      const freeModels = allModels
+      const preferredIds = new Set(PREFERRED_OPENROUTER_FREE_MODELS.map((m) => m.id));
+
+      // Filter sirf valid free text models, aur weird/blocked models (particle-ai) hatao
+      const otherFreeModels = allModels
         .filter((m) => {
           if (!m || !m.id || !m.pricing) return false;
+          if (preferredIds.has(m.id)) return false;
+          if (isBlockedModelId(m.id)) return false;
+
           const promptPrice = m.pricing.prompt;
           const completionPrice = m.pricing.completion;
 
@@ -238,19 +297,31 @@ document.addEventListener('DOMContentLoaded', () => {
           };
         });
 
-      // Prefer models with ':free' suffix and higher context length first
-      freeModels.sort((a, b) => {
+      // Secondary models mein trusted families aur ':free' models ko upar rakho
+      otherFreeModels.sort((a, b) => {
+        const trustDiff = getModelTrustScore(b.id) - getModelTrustScore(a.id);
+        if (trustDiff !== 0) return trustDiff;
+
         const aIsFreeTag = a.id.endsWith(':free') ? 1 : 0;
         const bIsFreeTag = b.id.endsWith(':free') ? 1 : 0;
         if (aIsFreeTag !== bIsFreeTag) return bIsFreeTag - aIsFreeTag;
+
         return (b.contextLength || 0) - (a.contextLength || 0);
       });
 
-      state.openRouterFreeModels = freeModels;
+      // Strictly keep the 3 preferred OpenRouter models first in exact priority order,
+      // then append other valid free models as secondary fallback.
+      state.openRouterFreeModels = [
+        ...PREFERRED_OPENROUTER_FREE_MODELS,
+        ...otherFreeModels
+      ];
+
       populateModelDropdownOptions();
       updateModelIndicator();
+      updateKeyStatusUI();
     } catch {
-      // Network/CORS error on background fetch handled silently without console spam
+      // Fallback safely to the 3 preferred OpenRouter models if fetch fails
+      state.openRouterFreeModels = [...PREFERRED_OPENROUTER_FREE_MODELS];
     } finally {
       state.isFetchingModels = false;
     }
@@ -258,7 +329,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function loadModelMode() {
     const saved = safeLocalStorageGet(STORAGE_KEYS.MODEL_MODE);
-    state.modelMode = saved && saved.trim() ? saved.trim() : 'auto';
+    if (saved && saved.trim() && !isBlockedModelId(saved)) {
+      state.modelMode = saved.trim();
+    } else {
+      state.modelMode = 'auto';
+    }
   }
 
   function injectModelSelectorInSettings() {
@@ -266,7 +341,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const modalBody = els.settingsModal.querySelector('.modal-body');
     if (!modalBody) return;
 
-    // Avoid duplicate injection
     if (document.getElementById('modelModeSelect')) {
       modelModeSelectEl = document.getElementById('modelModeSelect');
       populateModelDropdownOptions();
@@ -291,7 +365,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const help = document.createElement('p');
     help.className = 'form-help';
     help.textContent =
-      'Auto mode pehle sabhi OpenRouter free models try karta hai, phir Google (gemini-1.5-flash) aur Groq (llama3-8b-8192).';
+      'Auto mode pehle 3 standard OpenRouter free models (Llama 3, Gemma 2, Qwen 2) try karta hai, phir doosre free models, Google (gemini-1.5-flash) aur Groq (llama3-8b-8192).';
 
     group.appendChild(label);
     group.appendChild(select);
@@ -346,7 +420,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     modelModeSelectEl.appendChild(directGroup);
 
-    // Restore saved selection (fallback to 'auto' if saved model no longer exists)
     const hasSavedOption = Array.from(modelModeSelectEl.options).some(
       (o) => o.value === state.modelMode
     );
@@ -732,7 +805,7 @@ document.addEventListener('DOMContentLoaded', () => {
     populateModelDropdownOptions();
     updateKeyStatusUI();
 
-    if (state.openRouterFreeModels.length === 0) {
+    if (state.openRouterFreeModels.length <= PREFERRED_OPENROUTER_FREE_MODELS.length) {
       fetchOpenRouterFreeModels();
     }
 
@@ -1057,20 +1130,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     clearAttachments();
 
-    // Lock UI & create live switching status message in chat
+    // Lock UI & show live status indicator
     setGeneratingState(true);
     showTypingIndicator();
     const statusBubbleCtrl = createLiveStatusMessage();
     scrollToBottom();
 
-    // If user chose Auto and free models list isn't loaded yet, try fetching once
-    if (state.modelMode === 'auto' && state.openRouterFreeModels.length === 0) {
-      statusBubbleCtrl.update('Connecting... (Fetching free OpenRouter models)');
-      await fetchOpenRouterFreeModels();
-    }
-
-    const hasImageAttachment = attachments.some((a) => a.isImage && a.base64);
-    const modelQueue = buildModelQueue(hasImageAttachment);
+    const modelQueue = buildModelQueue();
     const apiMessages = buildApiMessages(chat.messages, attachments);
 
     // Execute Smart Auto-Fallback while-loop queue
@@ -1124,19 +1190,23 @@ document.addEventListener('DOMContentLoaded', () => {
   /**
    * Builds the Priority Queue:
    * - In 'auto' mode:
-   *   1) All fetched OpenRouter Free Models (if image attached, vision-capable first)
-   *   2) Google (gemini-1.5-flash)
-   *   3) Groq (llama3-8b-8192)
+   *   1) Strictly tries the 3 preferred OpenRouter models first:
+   *      a) meta-llama/llama-3-8b-instruct:free
+   *      b) google/gemma-2-9b-it:free
+   *      c) qwen/qwen-2-7b-instruct:free
+   *   2) Only if all 3 fail, tries other trusted OpenRouter free models (excluding weird models like particle-ai)
+   *   3) Then Google (gemini-1.5-flash)
+   *   4) Then Groq (llama3-8b-8192)
    * - In manual mode:
    *   Tries the user's selected model directly.
    */
-  function buildModelQueue(hasImageAttachment) {
+  function buildModelQueue() {
     const queue = [];
 
     if (state.modelMode && state.modelMode !== 'auto' && state.modelMode.includes('::')) {
       const [providerId, ...rest] = state.modelMode.split('::');
       const modelId = rest.join('::');
-      if (ENDPOINTS[providerId] && modelId) {
+      if (ENDPOINTS[providerId] && modelId && !isBlockedModelId(modelId)) {
         queue.push({
           providerId,
           providerName: providerId.toUpperCase(),
@@ -1148,27 +1218,33 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
 
-    // 1. OpenRouter Free Models first
-    if (state.openRouterFreeModels.length > 0) {
-      const orderedFree = hasImageAttachment
-        ? [
-            ...state.openRouterFreeModels.filter((m) => m.supportsImage),
-            ...state.openRouterFreeModels.filter((m) => !m.supportsImage)
-          ]
-        : state.openRouterFreeModels;
-
-      orderedFree.forEach((m) => {
-        queue.push({
-          providerId: 'openrouter',
-          providerName: 'OpenRouter',
-          url: ENDPOINTS.openrouter,
-          model: m.id,
-          label: `OpenRouter (${m.id})`
-        });
+    // 1. Strictly add the 3 preferred OpenRouter free models first in exact priority order
+    const seenIds = new Set();
+    PREFERRED_OPENROUTER_FREE_MODELS.forEach((m) => {
+      seenIds.add(m.id);
+      queue.push({
+        providerId: 'openrouter',
+        providerName: 'OpenRouter',
+        url: ENDPOINTS.openrouter,
+        model: m.id,
+        label: `OpenRouter (${m.id})`
       });
-    }
+    });
 
-    // 2. Tail Fallbacks: Google (gemini-1.5-flash) -> Groq (llama3-8b-8192)
+    // 2. Secondary OpenRouter free models (sirf upar wale 3 fail hone par use honge)
+    state.openRouterFreeModels.forEach((m) => {
+      if (!m || !m.id || seenIds.has(m.id) || isBlockedModelId(m.id)) return;
+      seenIds.add(m.id);
+      queue.push({
+        providerId: 'openrouter',
+        providerName: 'OpenRouter',
+        url: ENDPOINTS.openrouter,
+        model: m.id,
+        label: `OpenRouter (${m.id})`
+      });
+    });
+
+    // 3. Tail Fallbacks: Google (gemini-1.5-flash) -> Groq (llama3-8b-8192)
     FALLBACK_TAIL_MODELS.forEach((tail) => {
       queue.push({ ...tail });
     });
@@ -1196,7 +1272,6 @@ document.addEventListener('DOMContentLoaded', () => {
         continue;
       }
 
-      // If OpenRouter key itself is invalid (401), skip remaining OpenRouter models
       if (candidate.providerId === 'openrouter' && openRouterAuthFailed) {
         continue;
       }
@@ -1251,7 +1326,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
           const reason = getHttpErrorReason(response.status, apiErrMessage);
           errorLog.push(`${candidate.label}: ${reason}`);
-          continue; // Turant agle model par jao (429, 404, 500, etc.)
+          continue; // Turant agle model par jao
         }
 
         const data = await response.json();
@@ -1262,7 +1337,6 @@ document.addEventListener('DOMContentLoaded', () => {
           continue;
         }
 
-        // Valid response mila -> loop khatam aur answer return karo
         return {
           success: true,
           candidate,
@@ -1369,6 +1443,9 @@ document.addEventListener('DOMContentLoaded', () => {
     return false;
   }
 
+  /**
+   * Builds messages array with the exact System Prompt (Persona) ALWAYS first
+   */
   function buildApiMessages(chatMessages, currentAttachments) {
     const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
     const recentHistory = chatMessages.slice(-20);
