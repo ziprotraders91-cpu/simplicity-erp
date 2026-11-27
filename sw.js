@@ -3,7 +3,7 @@
  * Provides offline caching and PWA installability
  */
 
-const CACHE_NAME = 'fjai-v4';
+const CACHE_NAME = 'fjai-v5';
 const STATIC_ASSETS = [
   './',
   './index.html',
