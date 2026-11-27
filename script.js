@@ -150,9 +150,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  /**
-   * Adapts existing Settings modal in index.html to a clean single Unified Key input
-   */
   function setupUnifiedSettingsUI() {
     if (els.settingsTabs) {
       els.settingsTabs.style.display = 'none';
@@ -179,7 +176,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
     if (els.googleKey) {
-      els.googleKey.placeholder = 'Enter your FreeLLMAPI unified key...';
+      els.googleKey.placeholder = 'freellmapi-...';
     }
   }
 
@@ -187,7 +184,6 @@ document.addEventListener('DOMContentLoaded', () => {
      5. EVENT LISTENERS
      ========================================================================== */
   function bindEvents() {
-    // Sidebar toggles
     if (els.menuToggle) {
       els.menuToggle.addEventListener('click', openSidebar);
     }
@@ -198,7 +194,6 @@ document.addEventListener('DOMContentLoaded', () => {
       els.sidebarOverlay.addEventListener('click', closeSidebar);
     }
 
-    // New Chat
     if (els.newChatBtn) {
       els.newChatBtn.addEventListener('click', () => {
         startNewChat();
@@ -206,18 +201,15 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
 
-    // Theme toggle
     if (els.themeToggle) {
       els.themeToggle.addEventListener('click', toggleTheme);
     }
 
-    // Model indicator opens settings
     if (els.modelIndicator) {
       els.modelIndicator.addEventListener('click', openSettingsModal);
       els.modelIndicator.style.cursor = 'pointer';
     }
 
-    // Settings modal open/close/save
     if (els.settingsTrigger) {
       els.settingsTrigger.addEventListener('click', openSettingsModal);
     }
@@ -234,12 +226,10 @@ document.addEventListener('DOMContentLoaded', () => {
       els.saveKeysBtn.addEventListener('click', handleSaveKey);
     }
 
-    // Password visibility toggles
     bindVisibilityToggle(els.toggleGoogleKey, els.googleKey);
     bindVisibilityToggle(els.toggleGroqKey, els.groqKey);
     bindVisibilityToggle(els.toggleOpenRouterKey, els.openrouterKey);
 
-    // Message input & form submit
     if (els.inputForm) {
       els.inputForm.addEventListener('submit', (e) => {
         e.preventDefault();
@@ -266,7 +256,6 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
 
-    // File / Image attachments
     if (els.attachBtn && els.fileInput) {
       els.attachBtn.addEventListener('click', () => els.fileInput.click());
       els.fileInput.addEventListener('change', handleFileSelection);
@@ -276,7 +265,6 @@ document.addEventListener('DOMContentLoaded', () => {
       els.previewRemove.addEventListener('click', clearAttachments);
     }
 
-    // Global Escape key handler
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         if (isModalOpen()) {
@@ -531,7 +519,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (unified && unified.trim()) {
       state.apiKey = unified.trim();
     } else {
-      // Fallback if user previously saved a key under legacy fields
       const legacyRaw = safeLocalStorageGet(STORAGE_KEYS.LEGACY_API_KEYS);
       try {
         const parsed = legacyRaw ? JSON.parse(legacyRaw) : {};
@@ -780,7 +767,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (!trimmedText && attachments.length === 0) return;
 
-    // Quick slash commands
     if (trimmedText.startsWith('/') && attachments.length === 0) {
       if (handleSlashCommand(trimmedText)) {
         if (els.messageInput) {
@@ -792,7 +778,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
 
-    // Create chat session if needed
     let chat = getActiveChat();
     if (!chat) {
       const initialTitle = trimmedText || (attachments[0] ? attachments[0].name : 'New Chat');
@@ -801,7 +786,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     hideWelcomeState();
 
-    // Build user message object
     const userMessageObj = {
       role: 'user',
       text: trimmedText,
@@ -815,20 +799,17 @@ document.addEventListener('DOMContentLoaded', () => {
       timestamp: Date.now()
     };
 
-    // Save & render user message
     chat.messages.push(userMessageObj);
     chat.updatedAt = Date.now();
     saveChats();
     appendMessageToDOM(userMessageObj);
 
-    // Clear input & attachments
     if (els.messageInput && typeof overrideText !== 'string') {
       els.messageInput.value = '';
       autoResizeTextarea();
     }
     clearAttachments();
 
-    // Lock UI & show typing indicator
     setGeneratingState(true);
     showTypingIndicator();
     scrollToBottom();
@@ -859,6 +840,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const errorMsg = {
         role: 'assistant',
         text: CONNECTION_ERROR_MESSAGE,
+        errorDetails: result.details,
         isError: true,
         timestamp: Date.now()
       };
@@ -875,10 +857,17 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /**
-   * Sends a single request to the Unified FreeLLMAPI Server with model: "auto"
+   * Sends request to FreeLLMAPI Server and returns exact debug details on failure
    */
   async function callUnifiedApi(apiMessages) {
     const apiKey = (state.apiKey || '').trim();
+
+    if (!apiKey) {
+      return {
+        success: false,
+        details: 'Details: Settings mein FreeLLMAPI Unified Key set nahi hai.'
+      };
+    }
 
     try {
       const headers = {
@@ -897,14 +886,38 @@ document.addEventListener('DOMContentLoaded', () => {
       });
 
       if (!response.ok) {
-        return { success: false };
+        let serverMessage = '';
+        try {
+          const rawText = await response.text();
+          try {
+            const errJson = JSON.parse(rawText);
+            serverMessage =
+              (errJson && errJson.error && errJson.error.message) ||
+              (errJson && errJson.message) ||
+              (errJson && errJson.detail) ||
+              rawText;
+          } catch {
+            serverMessage = rawText;
+          }
+        } catch {
+          serverMessage = '';
+        }
+
+        const cleanMsg = String(serverMessage || '').replace(/<[^>]*>/g, '').trim().slice(0, 220);
+        return {
+          success: false,
+          details: `Details: HTTP ${response.status}${cleanMsg ? ' - ' + cleanMsg : ''}`
+        };
       }
 
       const data = await response.json();
       const content = extractAssistantText(data);
 
       if (!content) {
-        return { success: false };
+        return {
+          success: false,
+          details: 'Details: Server ne empty response bheja (choices empty).'
+        };
       }
 
       return {
@@ -912,9 +925,12 @@ document.addEventListener('DOMContentLoaded', () => {
         content,
         model: (data && typeof data.model === 'string' && data.model) || 'FreeLLMAPI (Auto)'
       };
-    } catch {
-      // Network, CORS, or server-down errors handled cleanly without console spam
-      return { success: false };
+    } catch (err) {
+      const msg = err && err.message ? err.message : 'Network / CORS error';
+      return {
+        success: false,
+        details: `Details: ${msg} (Ya toh Render server sleep/band hai, ya server par CORS allow nahi hai)`
+      };
     }
   }
 
@@ -948,9 +964,6 @@ document.addEventListener('DOMContentLoaded', () => {
     return false;
   }
 
-  /**
-   * Formats conversation history with System Prompt ALWAYS first in messages array
-   */
   function buildApiMessages(chatMessages, currentAttachments) {
     const messages = [
       {
@@ -1048,7 +1061,6 @@ document.addEventListener('DOMContentLoaded', () => {
       (isUser ? 'message-user user' : 'message-assistant assistant') +
       (msg.isError ? ' message-error' : '');
 
-    // Avatar
     const avatarEl = document.createElement('div');
     avatarEl.className = 'message-avatar';
     avatarEl.setAttribute('aria-hidden', 'true');
@@ -1056,11 +1068,9 @@ document.addEventListener('DOMContentLoaded', () => {
       ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"></circle><path d="M4 20c0-3.5 3.5-6 8-6s8 2.5 8 6"></path></svg>'
       : '<svg width="18" height="18" viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2"/><path d="M10 16c0-3.3 2.7-6 6-6s6 2.7 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="14" r="1.5" fill="currentColor"/><circle cx="16" cy="20" r="1.5" fill="currentColor"/></svg>';
 
-    // Content Wrapper
     const contentWrapper = document.createElement('div');
     contentWrapper.className = 'message-content';
 
-    // Bubble
     const bubbleEl = document.createElement('div');
     bubbleEl.className = 'message-bubble';
 
@@ -1071,6 +1081,14 @@ document.addEventListener('DOMContentLoaded', () => {
       errTitle.style.cssText = 'margin: 0; font-weight: 600; color: #ef4444;';
       errTitle.textContent = msg.text;
       bubbleEl.appendChild(errTitle);
+
+      if (msg.errorDetails) {
+        const errDetail = document.createElement('p');
+        errDetail.style.cssText =
+          'margin: 8px 0 0; font-size: 0.8rem; line-height: 1.45; color: #dc2626; word-break: break-word;';
+        errDetail.textContent = msg.errorDetails;
+        bubbleEl.appendChild(errDetail);
+      }
     } else if (isUser) {
       if (Array.isArray(msg.attachments) && msg.attachments.length > 0) {
         const attContainer = document.createElement('div');
@@ -1374,6 +1392,5 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // Start the app
   init();
 });
