@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Farhan Jawed - AI Agent</title>
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;charset=UTF-8,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%20100%20100%22%3E%3Crect%20width=%22100%22%20height=%22100%22%20fill=%22%230a0c2d%22/%3E%3Ctext%20x=%2220%22%20y=%2255%22%20font-family=%22Arial%20Bold%22%20font-size=%2240%22%20fill=%22%23ffffff%22%3EFJA%3C/text%3E%3C/svg%3E">
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#0a0c2d">
+    <link rel="apple-touch-icon" href="data:image/svg+xml;charset=UTF-8,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%20100%20100%22%3E%3Crect%20width=%22100%22%20height=%22100%22%20fill=%230a0c2d/%3E%3Ctext%20x=%2220%22%20y=%2255%22%20font-family=%22Arial%20Bold%22%20font-size=%2240%22%20fill=%23ffffff%3EFJA%3C/text%3E%3C/svg%3E">
+
+    <!-- External Stylesheet -->
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <!-- Background orbs -->
+    <div class="orbit orbit-1"></div>
+    <div class="orbit orbit-2"></div>
+
+    <!-- Header -->
+    <header class="glass padding-y" style="padding: 16px 20px;">
+      <div class="max-w-7xl mx-auto flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="avatar ai-avatar">FJA</div>
+          <h1 class="text-xl font-bold tracking-tight">Farhan Jawed - AI Agent</h1>
+        </div>
+        <div class="flex items-center gap-3">
+          <!-- Settings button -->
+          <button class="btn btn-secondary setting-btn" aria-label="Open settings" id="settingBtn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+          </button>
+
+          <!-- Model indicator -->
+          <span class="text-sm text-muted hidden" id="modelIndicator">Gemini</span>
+
+          <!-- Status dot -->
+          <span class="w-2 h-2 rounded-full status-dot" id="statusDot"></span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main content -->
+    <main class="max-w-7xl mx-auto p-4 pb-20">
+      <!-- Chat area -->
+      <div class="glass" style="max-height: 65vh; overflow-y: auto; margin-bottom: 16px; border-radius: 16px;">
+        <div class="h-full overflow-y-auto p-4" id="chatMessages">
+          <!-- Messages will be inserted here -->
+          <div class="text-center py-12 text-muted" id="welcomeMsg">
+            Welcome! Type a message below to chat with Farhan Jawed - AI Agent.
+          </div>
+        </div>
+
+        <div class="spinner" id="loadingSpinner"></div>
+      </div>
+
+      <!-- Control panel -->
+      <div class="glass" style="border-radius: 16px; padding: 16px;">
+        <div class="max-w-7xl mx-auto">
+          <!-- Text input row -->
+          <div class="flex items-end gap-2 mb-3">
+            <div class="flex-1">
+              <input
+                type="text"
+                class="input-field"
+                placeholder="Type your message..."
+                id="messageInput"
+                autocomplete="off"
+                aria-label="Message input"
+              >
+            </div>
+
+            <!-- Attachments button -->
+            <button class="btn btn-secondary w-10 h-10 p-0 justify-center" id="attachmentsBtnEl" aria-label="Attach files">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5L12 4l-5 5z"></path>
+              </svg>
+            </button>
+
+            <!-- Send button -->
+            <button type="button" class="btn btn-primary w-10 h-10 p-0 justify-center" id="sendBtnEl" aria-label="Send message">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="5" y1="19" x2="13" y2="5"></line>
+                <polyline points="12 5 19 12 12 19"></polyline>
+              </svg>
+            </button>
+          </div>
+
+          <!-- Upload area (hidden by default) -->
+          <div id="uploadArea" style="display: none;">
+            <div class="upload-area" id="dropZone" aria-label="Drop zone for files">
+              <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5L12 4l-5 5z"></path>
+              </svg>
+              <p>Drag & Drop or Click to Upload</p>
+              <small>Images, .txt, .js, .json, .csv</small>
+              <input type="file" id="fileInput" multiple accept="image/*,.txt,.js,.json,.csv" style="display: none;">
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settingsModal" aria-hidden="true">
+      <div class="modal-content">
+        <button class="modal-close" aria-label="Close settings" id="modalCloseBtn">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+
+        <div class="modal-title">
+          <h2>Settings</h2>
+          <p>Enter your API keys. Keys are stored locally in your browser.</p>
+        </div>
+
+        <!-- Google Key -->
+        <div class="settings-group">
+          <label class="settings-label">Google (Gemini) API Key</label>
+          <input
+            type="password"
+            class="settings-key"
+            placeholder="AIza... (from Google AI Studio)"
+            id="googleKey"
+            aria-label="Google API Key"
+          >
+          <p class="text-xs text-muted">Get free key from <a href="https://aistudio.google.com/" target="_blank">AI Studio</a></p>
+        </div>
+
+        <!-- Groq Key -->
+        <div class="settings-group">
+          <label class="settings-label">Groq API Key</label>
+          <input
+            type="password"
+            class="settings-key"
+            placeholder="gsk_... (from Groq Cloud)"
+            id="groqKey"
+            aria-label="Groq API Key"
+          >
+          <p class="text-xs text-muted">Get free key from <a href="https://groq.com/" target="_blank">Groq Cloud</a></p>
+        </div>
+
+        <!-- OpenRouter Key -->
+        <div class="settings-group">
+          <label class="settings-label">OpenRouter API Key</label>
+          <input
+            type="password"
+            class="settings-key"
+            placeholder="sk-or-... (from OpenRouter)"
+            id="openrouterKey"
+            aria-label="OpenRouter API Key"
+          >
+          <p class="text-xs text-muted">Get free key from <a href="https://openrouter.ai/" target="_blank">OpenRouter</a></p>
+        </div>
+
+        <div class="mt-8 pt-6 border-t" style="border-color: var(--border);">
+          <button type="button" class="btn btn-primary w-full" id="saveKeysBtn">
+            Save Keys
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- External Script -->
+    <script src="script.js"></script>
+  </body>
+</html>
