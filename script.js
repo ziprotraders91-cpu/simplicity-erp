@@ -37,16 +37,16 @@ document.addEventListener('DOMContentLoaded', () => {
     {
       id: 'groq',
       name: 'Groq',
-      displayModel: 'Llama 3.3 70B (Groq)',
+      displayModel: 'GPT-OSS 120B (Groq)',
       url: 'https://api.groq.com/openai/v1/chat/completions',
-      model: 'llama-3.3-70b-versatile'
+      model: 'openai/gpt-oss-120b'
     },
     {
       id: 'openrouter',
       name: 'OpenRouter',
-      displayModel: 'Llama 3.3 70B (OpenRouter)',
+      displayModel: 'Nemotron 3 Super 120B (OpenRouter)',
       url: 'https://openrouter.ai/api/v1/chat/completions',
-      model: 'meta-llama/llama-3.3-70b-instruct:free'
+      model: 'nvidia/nemotron-3-super-120b-a12b:free'
     }
   ];
 
@@ -824,7 +824,6 @@ document.addEventListener('DOMContentLoaded', () => {
         name: att.name,
         size: att.size,
         isImage: att.isImage,
-        // Keep small image previews cleanly; text files stored cleanly
         base64: att.isImage && att.base64.length < 300000 ? att.base64 : '',
         textContent: !att.isImage ? att.textContent : ''
       })),
@@ -874,7 +873,7 @@ document.addEventListener('DOMContentLoaded', () => {
       saveChats();
       appendMessageToDOM(assistantMsg);
     } else {
-      // Sabhi API fail hone par red error message chat window mein dikhana
+      // Sabhi API fail hone par red error message aur provider-wise debug details dikhana
       const errorText = 'Error: Saari API limits khatam hain ya keys galat hain.';
       const errorMsg = {
         role: 'assistant',
@@ -941,7 +940,10 @@ document.addEventListener('DOMContentLoaded', () => {
       const isLastUserMessage = index === recentHistory.length - 1 && msg.role === 'user';
 
       if (msg.role === 'assistant') {
-        messages.push({ role: 'assistant', content: msg.text || '' });
+        const safeReply = (msg.text || '').trim();
+        if (safeReply) {
+          messages.push({ role: 'assistant', content: safeReply });
+        }
         return;
       }
 
@@ -981,7 +983,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         messages.push({ role: 'user', content: contentParts });
       } else {
-        messages.push({ role: 'user', content: combinedText });
+        // Ensure non-empty string content so Google/Groq/OpenRouter never reject with 400
+        messages.push({ role: 'user', content: combinedText || '[Attached image]' });
       }
     });
 
@@ -989,8 +992,30 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /**
-   * Loops through Google -> Groq -> OpenRouter with automatic fallback on errors
-   * Note: Network/CORS errors are caught inside try...catch and returned cleanly (no console logging).
+   * Maps HTTP status codes to clear debugging labels
+   */
+  function getHttpErrorReason(status, apiMessage) {
+    const statusMap = {
+      400: 'Bad Request',
+      401: 'Invalid API Key (Unauthorized)',
+      403: 'Access Denied (Forbidden)',
+      404: 'Model not found',
+      429: 'Rate limit exceeded (Quota khatam)',
+      500: 'Server Error',
+      502: 'Bad Gateway',
+      503: 'Service Unavailable'
+    };
+
+    const baseReason = statusMap[status] || `HTTP ${status}`;
+    if (apiMessage) {
+      return `${baseReason} - ${apiMessage}`;
+    }
+    return baseReason;
+  }
+
+  /**
+   * Loops through Google -> Groq -> OpenRouter with automatic fallback on errors.
+   * Captures exact provider + failure reason for easy debugging (no console logging).
    */
   async function callWithFallback(apiMessages) {
     const errorLog = [];
@@ -999,7 +1024,7 @@ document.addEventListener('DOMContentLoaded', () => {
     for (const provider of API_PROVIDERS) {
       const apiKey = (state.apiKeys[provider.id] || '').trim();
       if (!apiKey) {
-        errorLog.push(`${provider.name}: Key missing`);
+        errorLog.push(`${provider.name}: API key missing`);
         continue;
       }
 
@@ -1017,27 +1042,36 @@ document.addEventListener('DOMContentLoaded', () => {
           headers['X-Title'] = 'Farhan Jawed AI Agent';
         }
 
+        // Standard OpenAI-compatible payload (no 'store' parameter so Google Gemini accepts it)
+        const requestBody = {
+          model: provider.model,
+          messages: apiMessages,
+          temperature: 0.7
+        };
+
         const response = await fetch(provider.url, {
           method: 'POST',
           headers,
-          body: JSON.stringify({
-            model: provider.model,
-            messages: apiMessages,
-            temperature: 0.7
-          })
+          body: JSON.stringify(requestBody)
         });
 
         if (!response.ok) {
-          let errMsg = `HTTP ${response.status}`;
+          let apiErrMessage = '';
           try {
             const errJson = await response.json();
-            if (errJson && errJson.error && errJson.error.message) {
-              errMsg = `${response.status}: ${errJson.error.message}`;
+            if (Array.isArray(errJson) && errJson[0] && errJson[0].error && errJson[0].error.message) {
+              apiErrMessage = errJson[0].error.message;
+            } else if (errJson && errJson.error && errJson.error.message) {
+              apiErrMessage = errJson.error.message;
+            } else if (errJson && typeof errJson.message === 'string') {
+              apiErrMessage = errJson.message;
             }
           } catch {
             // Ignore JSON parse error on non-JSON error responses
           }
-          errorLog.push(`${provider.name} (${errMsg})`);
+
+          const reason = getHttpErrorReason(response.status, apiErrMessage);
+          errorLog.push(`${provider.name}: ${reason}`);
           continue; // Try next fallback provider
         }
 
@@ -1045,7 +1079,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const choiceContent = extractAssistantText(data);
 
         if (!choiceContent) {
-          errorLog.push(`${provider.name} (Empty response)`);
+          errorLog.push(`${provider.name}: Empty response received`);
           continue;
         }
 
@@ -1058,15 +1092,15 @@ document.addEventListener('DOMContentLoaded', () => {
         // Handle CORS / Network errors gracefully without logging to console
         const msg = networkOrCorsErr && networkOrCorsErr.message
           ? networkOrCorsErr.message
-          : 'Network/CORS error';
-        errorLog.push(`${provider.name} (${msg})`);
+          : 'Network or CORS error';
+        errorLog.push(`${provider.name}: ${msg}`);
       }
     }
 
     return {
       success: false,
       details: anyKeyConfigured
-        ? errorLog.join(' | ')
+        ? errorLog.map((entry) => `• ${entry}`).join('\n')
         : 'Koi bhi API key set nahi hai. Settings icon par click karke apni key daalein.'
     };
   }
@@ -1131,7 +1165,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (msg.errorDetails) {
         const errDetail = document.createElement('p');
-        errDetail.style.cssText = 'margin: 6px 0 0; font-size: 0.8rem; opacity: 0.9; color: #f87171;';
+        errDetail.style.cssText =
+          'margin: 8px 0 0; font-size: 0.82rem; line-height: 1.5; opacity: 0.95; color: #f87171; white-space: pre-line;';
         errDetail.textContent = msg.errorDetails;
         bubbleEl.appendChild(errDetail);
       }
