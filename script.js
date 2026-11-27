@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * Farhan Jawed - AI Agent | script.js
- * Smart Auto-Fallback Queue, Priority OpenRouter Free Models, Persona & Markdown
+ * Unified FreeLLMAPI Client (model: "auto"), Vision/File Upload & Markdown
  * ============================================================================
  */
 
@@ -9,11 +9,11 @@
 
 document.addEventListener('DOMContentLoaded', () => {
   /* ==========================================================================
-     1. CONFIGURATION, PRIORITY MODELS & SYSTEM PERSONA
+     1. CONFIGURATION & UNIFIED API ENDPOINT
      ========================================================================== */
   const STORAGE_KEYS = {
-    API_KEYS: 'fj_ai_api_keys',
-    MODEL_MODE: 'fj_ai_model_mode',
+    UNIFIED_KEY: 'fj_ai_unified_api_key',
+    LEGACY_API_KEYS: 'fj_ai_api_keys',
     CHATS: 'fj_ai_chats',
     ACTIVE_CHAT_ID: 'fj_ai_active_chat_id',
     THEME: 'fj_ai_theme'
@@ -22,77 +22,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const MAX_CHAR_LIMIT = 4000;
   const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB limit per file
 
-  const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
+  // Unified FreeLLMAPI Server Endpoint & Model
+  const UNIFIED_API_URL = 'https://freellmapi-5wsm.onrender.com/v1/chat/completions';
+  const UNIFIED_MODEL_NAME = 'auto';
 
-  const ENDPOINTS = {
-    openrouter: 'https://openrouter.ai/api/v1/chat/completions',
-    google: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
-    groq: 'https://api.groq.com/openai/v1/chat/completions'
-  };
-
-  // Priority Order: OpenRouter ke sirf yeh 3 standard smart free models sabse pehle
-  const PREFERRED_OPENROUTER_FREE_MODELS = [
-    {
-      id: 'meta-llama/llama-3-8b-instruct:free',
-      name: 'Meta Llama 3 8B Instruct (Free)',
-      contextLength: 8192,
-      supportsImage: false
-    },
-    {
-      id: 'google/gemma-2-9b-it:free',
-      name: 'Google Gemma 2 9B IT (Free)',
-      contextLength: 8192,
-      supportsImage: false
-    },
-    {
-      id: 'qwen/qwen-2-7b-instruct:free',
-      name: 'Qwen 2 7B Instruct (Free)',
-      contextLength: 32768,
-      supportsImage: false
-    }
-  ];
-
-  // Weird / unreliable models jinhe auto-select list se block rakhna hai
-  const BLOCKED_MODEL_PATTERNS = [
-    'particle-ai',
-    'particle-1'
-  ];
-
-  // Reputable model families (agar top 3 fail hon toh secondary fallback mein inhe priority mile)
-  const TRUSTED_MODEL_PREFIXES = [
-    'meta-llama/',
-    'google/',
-    'qwen/',
-    'mistralai/',
-    'deepseek/',
-    'nvidia/',
-    'microsoft/',
-    'openai/'
-  ];
-
-  // Queue ke aakhir mein fallback models (Google aur phir Groq)
-  const FALLBACK_TAIL_MODELS = [
-    {
-      providerId: 'google',
-      providerName: 'Google Gemini',
-      url: ENDPOINTS.google,
-      model: 'gemini-1.5-flash',
-      label: 'Google (gemini-1.5-flash)'
-    },
-    {
-      providerId: 'groq',
-      providerName: 'Groq',
-      url: ENDPOINTS.groq,
-      model: 'llama3-8b-8192',
-      label: 'Groq (llama3-8b-8192)'
-    }
-  ];
-
-  // System Prompt (Persona) - har API request ke messages array mein sabse pehle
+  // Exact System Prompt (hamesha messages array mein sabse pehle jayega)
   const SYSTEM_PROMPT =
-    'You are Farhan Jawed - AI Agent, a highly intelligent and helpful personal assistant created by Farhan Jawed. ' +
-    'Always respond professionally, accurately, and in the language the user speaks. ' +
-    'Do not roleplay or write poems unless explicitly asked.';
+    'You are Farhan Jawed - AI Agent, created by Farhan Jawed. You are a highly intelligent, helpful, and professional AI assistant. Always answer accurately and in the same language the user speaks. Do not roleplay or act like any other AI.';
+
+  const CONNECTION_ERROR_MESSAGE =
+    'Error: Server se connect nahi ho paya. Kripya check karein ki FreeLLMAPI server ON hai.';
 
   const DEFAULT_SUGGESTIONS = [
     {
@@ -165,29 +104,20 @@ document.addEventListener('DOMContentLoaded', () => {
     toggleGoogleKey: document.getElementById('toggleGoogleKey'),
     toggleGroqKey: document.getElementById('toggleGroqKey'),
     toggleOpenRouterKey: document.getElementById('toggleOpenRouterKey'),
-    tabBtns: document.querySelectorAll('.settings-tabs .tab-btn'),
-    tabPanels: document.querySelectorAll('.modal-body .tab-panel'),
+    settingsTabs: document.querySelector('.settings-tabs'),
+    panelGoogle: document.getElementById('panel-google'),
+    panelGroq: document.getElementById('panel-groq'),
+    panelOpenRouter: document.getElementById('panel-openrouter'),
 
     // Toast
     toastContainer: document.getElementById('toastContainer')
   };
 
-  // Dynamically injected dropdown inside Settings Modal
-  let modelModeSelectEl = null;
-
   /* ==========================================================================
      3. APPLICATION STATE
      ========================================================================== */
   const state = {
-    apiKeys: {
-      google: '',
-      groq: '',
-      openrouter: ''
-    },
-    modelMode: 'auto', // 'auto' or 'providerId::modelId'
-    // Start with the 3 preferred OpenRouter models right away
-    openRouterFreeModels: [...PREFERRED_OPENROUTER_FREE_MODELS],
-    isFetchingModels: false,
+    apiKey: '',
     chats: [],
     activeChatId: null,
     pendingAttachments: [], // Array of { name, size, type, isImage, base64, textContent }
@@ -200,19 +130,15 @@ document.addEventListener('DOMContentLoaded', () => {
      ========================================================================== */
   function init() {
     configureMarkdown();
+    setupUnifiedSettingsUI();
     loadTheme();
-    loadApiKeys();
-    loadModelMode();
-    injectModelSelectorInSettings();
+    loadApiKey();
     loadChats();
     renderSuggestions();
     updateModelIndicator();
     updateKeyStatusUI();
     bindEvents();
     updateInputUIState();
-
-    // App load hote hi OpenRouter se additional free models fetch karo (top 3 ke baad fallback ke liye)
-    fetchOpenRouterFreeModels();
   }
 
   function configureMarkdown() {
@@ -224,210 +150,41 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  /* ==========================================================================
-     5. OPENROUTER FREE MODELS FETCH & SETTINGS DROPDOWN
-     ========================================================================== */
-  function isBlockedModelId(modelId) {
-    const lower = String(modelId || '').toLowerCase();
-    return BLOCKED_MODEL_PATTERNS.some((pattern) => lower.includes(pattern));
-  }
+  /**
+   * Adapts existing Settings modal in index.html to a clean single Unified Key input
+   */
+  function setupUnifiedSettingsUI() {
+    if (els.settingsTabs) {
+      els.settingsTabs.style.display = 'none';
+    }
+    if (els.panelGroq) {
+      els.panelGroq.setAttribute('hidden', '');
+      els.panelGroq.classList.remove('active');
+    }
+    if (els.panelOpenRouter) {
+      els.panelOpenRouter.setAttribute('hidden', '');
+      els.panelOpenRouter.classList.remove('active');
+    }
+    if (els.panelGoogle) {
+      els.panelGoogle.removeAttribute('hidden');
+      els.panelGoogle.classList.add('active');
 
-  function getModelTrustScore(modelId) {
-    const lower = String(modelId || '').toLowerCase();
-    const prefixMatch = TRUSTED_MODEL_PREFIXES.some((prefix) => lower.startsWith(prefix));
-    return prefixMatch ? 1 : 0;
-  }
+      const label = els.panelGoogle.querySelector('label[for="googleKey"]');
+      if (label) label.textContent = 'FreeLLMAPI Unified API Key';
 
-  async function fetchOpenRouterFreeModels() {
-    if (state.isFetchingModels) return;
-    state.isFetchingModels = true;
-
-    try {
-      const response = await fetch(OPENROUTER_MODELS_URL, {
-        method: 'GET',
-        headers: {
-          'Accept': 'application/json'
-        }
-      });
-
-      if (!response.ok) {
-        state.isFetchingModels = false;
-        return;
+      const help = document.getElementById('googleKeyHelp');
+      if (help) {
+        help.textContent =
+          'Apni FreeLLMAPI Unified Key yahan daalein. Ye key automatic smart routing (70+ models) ke liye use hogi.';
       }
-
-      const payload = await response.json();
-      const allModels = Array.isArray(payload && payload.data) ? payload.data : [];
-
-      const preferredIds = new Set(PREFERRED_OPENROUTER_FREE_MODELS.map((m) => m.id));
-
-      // Filter sirf valid free text models, aur weird/blocked models (particle-ai) hatao
-      const otherFreeModels = allModels
-        .filter((m) => {
-          if (!m || !m.id || !m.pricing) return false;
-          if (preferredIds.has(m.id)) return false;
-          if (isBlockedModelId(m.id)) return false;
-
-          const promptPrice = m.pricing.prompt;
-          const completionPrice = m.pricing.completion;
-
-          const isPromptFree =
-            promptPrice !== undefined &&
-            promptPrice !== null &&
-            parseFloat(promptPrice) === 0;
-          const isCompletionFree =
-            completionPrice !== undefined &&
-            completionPrice !== null &&
-            parseFloat(completionPrice) === 0;
-
-          if (!isPromptFree || !isCompletionFree) return false;
-
-          // Ensure model supports text output for chat completions
-          const outMods = m.architecture && m.architecture.output_modalities;
-          if (Array.isArray(outMods) && !outMods.includes('text')) return false;
-
-          return true;
-        })
-        .map((m) => {
-          const inputMods = (m.architecture && m.architecture.input_modalities) || [];
-          return {
-            id: m.id,
-            name: m.name || m.id,
-            contextLength: m.context_length || 0,
-            supportsImage: Array.isArray(inputMods) && inputMods.includes('image')
-          };
-        });
-
-      // Secondary models mein trusted families aur ':free' models ko upar rakho
-      otherFreeModels.sort((a, b) => {
-        const trustDiff = getModelTrustScore(b.id) - getModelTrustScore(a.id);
-        if (trustDiff !== 0) return trustDiff;
-
-        const aIsFreeTag = a.id.endsWith(':free') ? 1 : 0;
-        const bIsFreeTag = b.id.endsWith(':free') ? 1 : 0;
-        if (aIsFreeTag !== bIsFreeTag) return bIsFreeTag - aIsFreeTag;
-
-        return (b.contextLength || 0) - (a.contextLength || 0);
-      });
-
-      // Strictly keep the 3 preferred OpenRouter models first in exact priority order,
-      // then append other valid free models as secondary fallback.
-      state.openRouterFreeModels = [
-        ...PREFERRED_OPENROUTER_FREE_MODELS,
-        ...otherFreeModels
-      ];
-
-      populateModelDropdownOptions();
-      updateModelIndicator();
-      updateKeyStatusUI();
-    } catch {
-      // Fallback safely to the 3 preferred OpenRouter models if fetch fails
-      state.openRouterFreeModels = [...PREFERRED_OPENROUTER_FREE_MODELS];
-    } finally {
-      state.isFetchingModels = false;
     }
-  }
-
-  function loadModelMode() {
-    const saved = safeLocalStorageGet(STORAGE_KEYS.MODEL_MODE);
-    if (saved && saved.trim() && !isBlockedModelId(saved)) {
-      state.modelMode = saved.trim();
-    } else {
-      state.modelMode = 'auto';
+    if (els.googleKey) {
+      els.googleKey.placeholder = 'Enter your FreeLLMAPI unified key...';
     }
-  }
-
-  function injectModelSelectorInSettings() {
-    if (!els.settingsModal) return;
-    const modalBody = els.settingsModal.querySelector('.modal-body');
-    if (!modalBody) return;
-
-    if (document.getElementById('modelModeSelect')) {
-      modelModeSelectEl = document.getElementById('modelModeSelect');
-      populateModelDropdownOptions();
-      return;
-    }
-
-    const group = document.createElement('div');
-    group.className = 'form-group';
-    group.id = 'modelModeGroup';
-    group.style.marginTop = '12px';
-
-    const label = document.createElement('label');
-    label.setAttribute('for', 'modelModeSelect');
-    label.textContent = 'Model Selection Mode';
-
-    const select = document.createElement('select');
-    select.id = 'modelModeSelect';
-    select.className = 'settings-input';
-    select.style.width = '100%';
-    select.style.cursor = 'pointer';
-
-    const help = document.createElement('p');
-    help.className = 'form-help';
-    help.textContent =
-      'Auto mode pehle 3 standard OpenRouter free models (Llama 3, Gemma 2, Qwen 2) try karta hai, phir doosre free models, Google (gemini-1.5-flash) aur Groq (llama3-8b-8192).';
-
-    group.appendChild(label);
-    group.appendChild(select);
-    group.appendChild(help);
-
-    if (els.keyStatus && els.keyStatus.parentNode === modalBody) {
-      modalBody.insertBefore(group, els.keyStatus);
-    } else {
-      modalBody.appendChild(group);
-    }
-
-    modelModeSelectEl = select;
-    populateModelDropdownOptions();
-  }
-
-  function populateModelDropdownOptions() {
-    if (!modelModeSelectEl) return;
-
-    modelModeSelectEl.innerHTML = '';
-
-    // 1. Default Auto Option
-    const autoOpt = document.createElement('option');
-    autoOpt.value = 'auto';
-    autoOpt.textContent = 'Auto (Best Available)';
-    modelModeSelectEl.appendChild(autoOpt);
-
-    // 2. OpenRouter Free Models Group
-    if (state.openRouterFreeModels.length > 0) {
-      const orGroup = document.createElement('optgroup');
-      orGroup.label = `OpenRouter Free Models (${state.openRouterFreeModels.length})`;
-
-      state.openRouterFreeModels.forEach((m) => {
-        const opt = document.createElement('option');
-        opt.value = `openrouter::${m.id}`;
-        opt.textContent = `${m.name} (${m.id})`;
-        orGroup.appendChild(opt);
-      });
-
-      modelModeSelectEl.appendChild(orGroup);
-    }
-
-    // 3. Direct Fallback Providers
-    const directGroup = document.createElement('optgroup');
-    directGroup.label = 'Direct Fallback Providers';
-
-    FALLBACK_TAIL_MODELS.forEach((item) => {
-      const opt = document.createElement('option');
-      opt.value = `${item.providerId}::${item.model}`;
-      opt.textContent = item.label;
-      directGroup.appendChild(opt);
-    });
-
-    modelModeSelectEl.appendChild(directGroup);
-
-    const hasSavedOption = Array.from(modelModeSelectEl.options).some(
-      (o) => o.value === state.modelMode
-    );
-    modelModeSelectEl.value = hasSavedOption ? state.modelMode : 'auto';
   }
 
   /* ==========================================================================
-     6. EVENT LISTENERS
+     5. EVENT LISTENERS
      ========================================================================== */
   function bindEvents() {
     // Sidebar toggles
@@ -474,13 +231,8 @@ document.addEventListener('DOMContentLoaded', () => {
       els.modalBackdrop.addEventListener('click', closeSettingsModal);
     }
     if (els.saveKeysBtn) {
-      els.saveKeysBtn.addEventListener('click', handleSaveKeys);
+      els.saveKeysBtn.addEventListener('click', handleSaveKey);
     }
-
-    // Settings Tabs
-    els.tabBtns.forEach((btn) => {
-      btn.addEventListener('click', () => switchSettingsTab(btn.dataset.panel));
-    });
 
     // Password visibility toggles
     bindVisibilityToggle(els.toggleGoogleKey, els.googleKey);
@@ -537,7 +289,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     7. THEME MANAGEMENT
+     6. THEME MANAGEMENT
      ========================================================================== */
   function loadTheme() {
     const saved = safeLocalStorageGet(STORAGE_KEYS.THEME);
@@ -562,7 +314,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     8. SIDEBAR & CHAT HISTORY MANAGEMENT
+     7. SIDEBAR & CHAT HISTORY MANAGEMENT
      ========================================================================== */
   function openSidebar() {
     if (els.sidebar) els.sidebar.classList.add('open');
@@ -772,27 +524,27 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     9. SETTINGS MODAL & API KEY MANAGEMENT
+     8. SETTINGS MODAL & UNIFIED API KEY MANAGEMENT
      ========================================================================== */
-  function loadApiKeys() {
-    const raw = safeLocalStorageGet(STORAGE_KEYS.API_KEYS);
-    try {
-      const parsed = raw ? JSON.parse(raw) : {};
-      state.apiKeys = {
-        google: typeof parsed.google === 'string' ? parsed.google.trim() : '',
-        groq: typeof parsed.groq === 'string' ? parsed.groq.trim() : '',
-        openrouter: typeof parsed.openrouter === 'string' ? parsed.openrouter.trim() : ''
-      };
-    } catch {
-      state.apiKeys = { google: '', groq: '', openrouter: '' };
+  function loadApiKey() {
+    const unified = safeLocalStorageGet(STORAGE_KEYS.UNIFIED_KEY);
+    if (unified && unified.trim()) {
+      state.apiKey = unified.trim();
+    } else {
+      // Fallback if user previously saved a key under legacy fields
+      const legacyRaw = safeLocalStorageGet(STORAGE_KEYS.LEGACY_API_KEYS);
+      try {
+        const parsed = legacyRaw ? JSON.parse(legacyRaw) : {};
+        state.apiKey = String(parsed.google || parsed.groq || parsed.openrouter || '').trim();
+      } catch {
+        state.apiKey = '';
+      }
     }
-    populateKeyInputs();
+    populateKeyInput();
   }
 
-  function populateKeyInputs() {
-    if (els.googleKey) els.googleKey.value = state.apiKeys.google || '';
-    if (els.groqKey) els.groqKey.value = state.apiKeys.groq || '';
-    if (els.openrouterKey) els.openrouterKey.value = state.apiKeys.openrouter || '';
+  function populateKeyInput() {
+    if (els.googleKey) els.googleKey.value = state.apiKey || '';
   }
 
   function isModalOpen() {
@@ -801,13 +553,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function openSettingsModal() {
-    populateKeyInputs();
-    populateModelDropdownOptions();
+    populateKeyInput();
     updateKeyStatusUI();
-
-    if (state.openRouterFreeModels.length <= PREFERRED_OPENROUTER_FREE_MODELS.length) {
-      fetchOpenRouterFreeModels();
-    }
 
     if (!els.settingsModal) return;
     if (typeof els.settingsModal.showModal === 'function') {
@@ -842,26 +589,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (els.settingsTrigger) els.settingsTrigger.setAttribute('aria-expanded', 'false');
   }
 
-  function switchSettingsTab(panelName) {
-    if (!panelName) return;
-
-    els.tabBtns.forEach((btn) => {
-      const isSelected = btn.dataset.panel === panelName;
-      btn.classList.toggle('active', isSelected);
-      btn.setAttribute('aria-selected', isSelected ? 'true' : 'false');
-    });
-
-    els.tabPanels.forEach((panel) => {
-      const isMatch = panel.id === 'panel-' + panelName;
-      panel.classList.toggle('active', isMatch);
-      if (isMatch) {
-        panel.removeAttribute('hidden');
-      } else {
-        panel.setAttribute('hidden', '');
-      }
-    });
-  }
-
   function bindVisibilityToggle(buttonEl, inputEl) {
     if (!buttonEl || !inputEl) return;
     buttonEl.addEventListener('click', () => {
@@ -872,91 +599,62 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  function handleSaveKeys() {
-    state.apiKeys = {
-      google: els.googleKey ? els.googleKey.value.trim() : '',
-      groq: els.groqKey ? els.groqKey.value.trim() : '',
-      openrouter: els.openrouterKey ? els.openrouterKey.value.trim() : ''
-    };
+  function handleSaveKey() {
+    const enteredKey =
+      (els.googleKey && els.googleKey.value.trim()) ||
+      (els.groqKey && els.groqKey.value.trim()) ||
+      (els.openrouterKey && els.openrouterKey.value.trim()) ||
+      '';
 
-    if (modelModeSelectEl) {
-      state.modelMode = modelModeSelectEl.value || 'auto';
-      safeLocalStorageSet(STORAGE_KEYS.MODEL_MODE, state.modelMode);
-    }
+    state.apiKey = enteredKey;
+    safeLocalStorageSet(STORAGE_KEYS.UNIFIED_KEY, state.apiKey);
 
-    safeLocalStorageSet(STORAGE_KEYS.API_KEYS, JSON.stringify(state.apiKeys));
     updateKeyStatusUI();
     updateModelIndicator();
     closeSettingsModal();
-    showToast('Settings & API keys saved!', 'success');
+    showToast('FreeLLMAPI key saved successfully!', 'success');
   }
 
   function updateKeyStatusUI() {
     if (!els.keyStatus) return;
 
-    const providers = [
-      { id: 'openrouter', name: 'OpenRouter', extra: `${state.openRouterFreeModels.length} free models` },
-      { id: 'google', name: 'Google Gemini', extra: 'gemini-1.5-flash' },
-      { id: 'groq', name: 'Groq', extra: 'llama3-8b-8192' }
-    ];
+    const hasKey = Boolean(state.apiKey);
+    const dotColor = hasKey ? '#22c55e' : '#f59e0b';
+    const statusText = hasKey ? 'Configured (model: auto)' : 'Not set';
 
-    const statusHtml = providers
-      .map((p) => {
-        const hasKey = Boolean(state.apiKeys[p.id]);
-        const dotColor = hasKey ? '#22c55e' : '#94a3b8';
-        const statusText = hasKey ? `Configured (${p.extra})` : 'Not set';
-        return (
-          `<div class="key-status-item" style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-radius:8px;font-size:0.85rem;">` +
-          `<span style="display:flex;align-items:center;gap:8px;">` +
-          `<span style="width:8px;height:8px;border-radius:50%;background:${dotColor};display:inline-block;"></span>` +
-          `<span>${escapeHtml(p.name)}</span>` +
-          `</span>` +
-          `<span style="opacity:0.8;color:${hasKey ? '#22c55e' : 'inherit'};">${escapeHtml(statusText)}</span>` +
-          `</div>`
-        );
-      })
-      .join('');
-
-    els.keyStatus.innerHTML = statusHtml;
+    els.keyStatus.innerHTML =
+      `<div class="key-status-item" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-radius:8px;font-size:0.85rem;">` +
+      `<span style="display:flex;align-items:center;gap:8px;">` +
+      `<span style="width:8px;height:8px;border-radius:50%;background:${dotColor};display:inline-block;"></span>` +
+      `<span>FreeLLMAPI Server</span>` +
+      `</span>` +
+      `<span style="opacity:0.85;color:${dotColor};">${escapeHtml(statusText)}</span>` +
+      `</div>`;
   }
 
-  function updateModelIndicator(activeModelLabel) {
+  function updateModelIndicator(customLabel) {
     if (!els.modelIndicator) return;
     const nameEl = els.modelIndicator.querySelector('.model-name');
     const dotEl = els.modelIndicator.querySelector('.model-dot');
     if (!nameEl) return;
 
-    if (activeModelLabel) {
-      nameEl.textContent = activeModelLabel;
+    if (customLabel) {
+      nameEl.textContent = customLabel;
       if (dotEl) dotEl.style.backgroundColor = '#22c55e';
       return;
     }
 
-    const hasAnyKey = Boolean(
-      state.apiKeys.openrouter || state.apiKeys.google || state.apiKeys.groq
-    );
-
-    if (!hasAnyKey) {
-      nameEl.textContent = 'Add API Key';
-      if (dotEl) dotEl.style.backgroundColor = '#f59e0b';
-      return;
-    }
-
-    if (state.modelMode === 'auto') {
-      const freeCount = state.openRouterFreeModels.length;
-      nameEl.textContent = freeCount > 0
-        ? `Auto (${freeCount} Free + Fallbacks)`
-        : 'Auto (Best Available)';
+    if (state.apiKey) {
+      nameEl.textContent = 'FreeLLMAPI (Auto)';
       if (dotEl) dotEl.style.backgroundColor = '#22c55e';
     } else {
-      const parts = state.modelMode.split('::');
-      nameEl.textContent = parts[1] || state.modelMode;
-      if (dotEl) dotEl.style.backgroundColor = '#22c55e';
+      nameEl.textContent = 'Add API Key';
+      if (dotEl) dotEl.style.backgroundColor = '#f59e0b';
     }
   }
 
   /* ==========================================================================
-     10. FILE & IMAGE ATTACHMENT HANDLING
+     9. FILE & IMAGE ATTACHMENT HANDLING
      ========================================================================== */
   async function handleFileSelection(e) {
     const files = Array.from(e.target.files || []);
@@ -1069,7 +767,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     11. SMART AUTO-FALLBACK QUEUE & CHAT MESSAGING ENGINE
+     10. CHAT MESSAGING & UNIFIED FREELMMAPI CALL
      ========================================================================== */
   async function handleSendMessage(overrideText) {
     if (state.isGenerating) return;
@@ -1130,33 +828,25 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     clearAttachments();
 
-    // Lock UI & show live status indicator
+    // Lock UI & show typing indicator
     setGeneratingState(true);
     showTypingIndicator();
-    const statusBubbleCtrl = createLiveStatusMessage();
     scrollToBottom();
 
-    const modelQueue = buildModelQueue();
     const apiMessages = buildApiMessages(chat.messages, attachments);
+    const result = await callUnifiedApi(apiMessages);
 
-    // Execute Smart Auto-Fallback while-loop queue
-    const result = await executeModelQueue(modelQueue, apiMessages, (statusText) => {
-      statusBubbleCtrl.update(statusText);
-      scrollToBottom();
-    });
-
-    // Remove temporary "Connecting... (Trying model X)" indicator
-    statusBubbleCtrl.remove();
     hideTypingIndicator();
     setGeneratingState(false);
 
     if (result.success) {
-      updateModelIndicator(result.candidate.model);
+      const usedModel = result.model || 'FreeLLMAPI (Auto)';
+      updateModelIndicator(usedModel);
 
       const assistantMsg = {
         role: 'assistant',
         text: result.content,
-        model: result.candidate.label,
+        model: usedModel,
         isError: false,
         timestamp: Date.now()
       };
@@ -1166,12 +856,9 @@ document.addEventListener('DOMContentLoaded', () => {
       saveChats();
       appendMessageToDOM(assistantMsg);
     } else {
-      updateModelIndicator();
-
       const errorMsg = {
         role: 'assistant',
-        text: 'Sabhi models busy hain, thodi der baad try karein',
-        errorDetails: result.details,
+        text: CONNECTION_ERROR_MESSAGE,
         isError: true,
         timestamp: Date.now()
       };
@@ -1188,229 +875,47 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /**
-   * Builds the Priority Queue:
-   * - In 'auto' mode:
-   *   1) Strictly tries the 3 preferred OpenRouter models first:
-   *      a) meta-llama/llama-3-8b-instruct:free
-   *      b) google/gemma-2-9b-it:free
-   *      c) qwen/qwen-2-7b-instruct:free
-   *   2) Only if all 3 fail, tries other trusted OpenRouter free models (excluding weird models like particle-ai)
-   *   3) Then Google (gemini-1.5-flash)
-   *   4) Then Groq (llama3-8b-8192)
-   * - In manual mode:
-   *   Tries the user's selected model directly.
+   * Sends a single request to the Unified FreeLLMAPI Server with model: "auto"
    */
-  function buildModelQueue() {
-    const queue = [];
+  async function callUnifiedApi(apiMessages) {
+    const apiKey = (state.apiKey || '').trim();
 
-    if (state.modelMode && state.modelMode !== 'auto' && state.modelMode.includes('::')) {
-      const [providerId, ...rest] = state.modelMode.split('::');
-      const modelId = rest.join('::');
-      if (ENDPOINTS[providerId] && modelId && !isBlockedModelId(modelId)) {
-        queue.push({
-          providerId,
-          providerName: providerId.toUpperCase(),
-          url: ENDPOINTS[providerId],
-          model: modelId,
-          label: `${providerId} (${modelId})`
-        });
-        return queue;
-      }
-    }
+    try {
+      const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      };
 
-    // 1. Strictly add the 3 preferred OpenRouter free models first in exact priority order
-    const seenIds = new Set();
-    PREFERRED_OPENROUTER_FREE_MODELS.forEach((m) => {
-      seenIds.add(m.id);
-      queue.push({
-        providerId: 'openrouter',
-        providerName: 'OpenRouter',
-        url: ENDPOINTS.openrouter,
-        model: m.id,
-        label: `OpenRouter (${m.id})`
+      const response = await fetch(UNIFIED_API_URL, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: UNIFIED_MODEL_NAME,
+          messages: apiMessages,
+          temperature: 0.7
+        })
       });
-    });
 
-    // 2. Secondary OpenRouter free models (sirf upar wale 3 fail hone par use honge)
-    state.openRouterFreeModels.forEach((m) => {
-      if (!m || !m.id || seenIds.has(m.id) || isBlockedModelId(m.id)) return;
-      seenIds.add(m.id);
-      queue.push({
-        providerId: 'openrouter',
-        providerName: 'OpenRouter',
-        url: ENDPOINTS.openrouter,
-        model: m.id,
-        label: `OpenRouter (${m.id})`
-      });
-    });
-
-    // 3. Tail Fallbacks: Google (gemini-1.5-flash) -> Groq (llama3-8b-8192)
-    FALLBACK_TAIL_MODELS.forEach((tail) => {
-      queue.push({ ...tail });
-    });
-
-    return queue;
-  }
-
-  /**
-   * Solid while-loop + try-catch executor across the model queue.
-   * Immediately advances to the next model on 429, 404, 500, 400, or network/CORS errors.
-   */
-  async function executeModelQueue(queue, apiMessages, onStatusUpdate) {
-    const errorLog = [];
-    let anyKeyConfigured = false;
-    let openRouterAuthFailed = false;
-    let index = 0;
-
-    while (index < queue.length) {
-      const candidate = queue[index];
-      index += 1;
-
-      const apiKey = (state.apiKeys[candidate.providerId] || '').trim();
-      if (!apiKey) {
-        errorLog.push(`${candidate.label}: API key missing`);
-        continue;
+      if (!response.ok) {
+        return { success: false };
       }
 
-      if (candidate.providerId === 'openrouter' && openRouterAuthFailed) {
-        continue;
+      const data = await response.json();
+      const content = extractAssistantText(data);
+
+      if (!content) {
+        return { success: false };
       }
 
-      anyKeyConfigured = true;
-
-      // Update live UI: "Connecting... (Trying model X)"
-      if (typeof onStatusUpdate === 'function') {
-        onStatusUpdate(`Connecting... (Trying model ${candidate.model})`);
-      }
-      updateModelIndicator(`Trying ${candidate.model}...`);
-
-      try {
-        const headers = {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        };
-
-        if (candidate.providerId === 'openrouter') {
-          headers['HTTP-Referer'] = window.location.origin || 'http://localhost';
-          headers['X-Title'] = 'Farhan Jawed AI Agent';
-        }
-
-        const response = await fetch(candidate.url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            model: candidate.model,
-            messages: apiMessages,
-            temperature: 0.7
-          })
-        });
-
-        if (!response.ok) {
-          let apiErrMessage = '';
-          try {
-            const errJson = await response.json();
-            if (Array.isArray(errJson) && errJson[0]?.error?.message) {
-              apiErrMessage = errJson[0].error.message;
-            } else if (errJson?.error?.message) {
-              apiErrMessage = errJson.error.message;
-            } else if (typeof errJson?.message === 'string') {
-              apiErrMessage = errJson.message;
-            }
-          } catch {
-            // Non-JSON error body
-          }
-
-          if (candidate.providerId === 'openrouter' && response.status === 401) {
-            openRouterAuthFailed = true;
-          }
-
-          const reason = getHttpErrorReason(response.status, apiErrMessage);
-          errorLog.push(`${candidate.label}: ${reason}`);
-          continue; // Turant agle model par jao
-        }
-
-        const data = await response.json();
-        const choiceContent = extractAssistantText(data);
-
-        if (!choiceContent) {
-          errorLog.push(`${candidate.label}: Empty response received`);
-          continue;
-        }
-
-        return {
-          success: true,
-          candidate,
-          content: choiceContent
-        };
-      } catch (networkOrCorsErr) {
-        const errMsg =
-          networkOrCorsErr && networkOrCorsErr.message
-            ? networkOrCorsErr.message
-            : 'Network or CORS error';
-        errorLog.push(`${candidate.label}: ${errMsg}`);
-        continue; // Error aane par agle model par jao
-      }
+      return {
+        success: true,
+        content,
+        model: (data && typeof data.model === 'string' && data.model) || 'FreeLLMAPI (Auto)'
+      };
+    } catch {
+      // Network, CORS, or server-down errors handled cleanly without console spam
+      return { success: false };
     }
-
-    return {
-      success: false,
-      details: anyKeyConfigured
-        ? errorLog.slice(0, 8).map((entry) => `• ${entry}`).join('\n') +
-          (errorLog.length > 8 ? `\n• ...and ${errorLog.length - 8} more failed attempts` : '')
-        : 'Koi bhi API key set nahi hai. Settings icon par click karke apni key daalein.'
-    };
-  }
-
-  function createLiveStatusMessage() {
-    const statusEl = document.createElement('div');
-    statusEl.className = 'message message-assistant assistant live-status-message';
-    statusEl.setAttribute('aria-live', 'polite');
-
-    const avatarEl = document.createElement('div');
-    avatarEl.className = 'message-avatar';
-    avatarEl.setAttribute('aria-hidden', 'true');
-    avatarEl.innerHTML =
-      '<svg width="18" height="18" viewBox="0 0 32 32" fill="none">' +
-      '<circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2"/>' +
-      '<path d="M10 16c0-3.3 2.7-6 6-6s6 2.7 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
-
-    const contentWrapper = document.createElement('div');
-    contentWrapper.className = 'message-content';
-
-    const bubbleEl = document.createElement('div');
-    bubbleEl.className = 'message-bubble';
-    bubbleEl.style.cssText =
-      'display:inline-flex;align-items:center;gap:10px;padding:10px 14px;' +
-      'font-size:0.88rem;color:#c4b5fd;border-color:rgba(139,92,246,0.4);';
-
-    const pulseDot = document.createElement('span');
-    pulseDot.style.cssText =
-      'width:8px;height:8px;border-radius:50%;background:#8b5cf6;flex-shrink:0;' +
-      'box-shadow:0 0 10px #8b5cf6;';
-
-    const textSpan = document.createElement('span');
-    textSpan.textContent = 'Connecting...';
-
-    bubbleEl.appendChild(pulseDot);
-    bubbleEl.appendChild(textSpan);
-    contentWrapper.appendChild(bubbleEl);
-    statusEl.appendChild(avatarEl);
-    statusEl.appendChild(contentWrapper);
-
-    if (els.messagesList) {
-      els.messagesList.appendChild(statusEl);
-    }
-
-    return {
-      update(newText) {
-        textSpan.textContent = newText;
-      },
-      remove() {
-        if (statusEl.parentNode) {
-          statusEl.parentNode.removeChild(statusEl);
-        }
-      }
-    };
   }
 
   function handleSlashCommand(cmd) {
@@ -1431,7 +936,7 @@ document.addEventListener('DOMContentLoaded', () => {
         text:
           '**Available Commands:**\n' +
           '- `/new` or `/clear` — Start a fresh conversation\n' +
-          '- `/settings` or `/keys` — Open API key & model settings\n' +
+          '- `/settings` or `/keys` — Open API key settings\n' +
           '- `/help` — Show this command list',
         model: 'System',
         isError: false,
@@ -1444,10 +949,16 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /**
-   * Builds messages array with the exact System Prompt (Persona) ALWAYS first
+   * Formats conversation history with System Prompt ALWAYS first in messages array
    */
   function buildApiMessages(chatMessages, currentAttachments) {
-    const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
+    const messages = [
+      {
+        role: 'system',
+        content: SYSTEM_PROMPT
+      }
+    ];
+
     const recentHistory = chatMessages.slice(-20);
 
     recentHistory.forEach((msg, index) => {
@@ -1504,22 +1015,6 @@ document.addEventListener('DOMContentLoaded', () => {
     return messages;
   }
 
-  function getHttpErrorReason(status, apiMessage) {
-    const statusMap = {
-      400: 'Bad Request',
-      401: 'Invalid API Key (Unauthorized)',
-      403: 'Access Denied (Forbidden)',
-      404: 'Model not found',
-      429: 'Rate limit exceeded (Busy)',
-      500: 'Server Error',
-      502: 'Bad Gateway',
-      503: 'Service Unavailable'
-    };
-
-    const baseReason = statusMap[status] || `HTTP ${status}`;
-    return apiMessage ? `${baseReason} - ${apiMessage}` : baseReason;
-  }
-
   function extractAssistantText(data) {
     if (!data || !Array.isArray(data.choices) || data.choices.length === 0) {
       return '';
@@ -1541,7 +1036,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     12. MESSAGE RENDERING, MARKDOWN & CODE BLOCK COPY BUTTONS
+     11. MESSAGE RENDERING, MARKDOWN & CODE BLOCK COPY BUTTONS
      ========================================================================== */
   function appendMessageToDOM(msg) {
     if (!els.messagesList) return;
@@ -1576,14 +1071,6 @@ document.addEventListener('DOMContentLoaded', () => {
       errTitle.style.cssText = 'margin: 0; font-weight: 600; color: #ef4444;';
       errTitle.textContent = msg.text;
       bubbleEl.appendChild(errTitle);
-
-      if (msg.errorDetails) {
-        const errDetail = document.createElement('p');
-        errDetail.style.cssText =
-          'margin: 8px 0 0; font-size: 0.8rem; line-height: 1.5; opacity: 0.95; color: #f87171; white-space: pre-line;';
-        errDetail.textContent = msg.errorDetails;
-        bubbleEl.appendChild(errDetail);
-      }
     } else if (isUser) {
       if (Array.isArray(msg.attachments) && msg.attachments.length > 0) {
         const attContainer = document.createElement('div');
@@ -1736,7 +1223,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     13. UI HELPERS (Suggestions, Typing Indicator, Toasts, Scrolling)
+     12. UI HELPERS (Suggestions, Typing Indicator, Toasts, Scrolling)
      ========================================================================== */
   function renderSuggestions() {
     if (!els.welcomeSuggestions) return;
