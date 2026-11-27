@@ -4,17 +4,23 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0a0a1a">
-  <meta name="description" content="Farhan Jawed - AI Agent | Personal AI Chatbot">
+  <meta name="description" content="Farhan Jawed - AI Agent | Personal AI Chatbot with Multi-Model Fallback">
   <title>Farhan Jawed - AI Agent</title>
 
   <!-- PWA Manifest -->
   <link rel="manifest" href="manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Farhan Jawed AI">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
 
   <!-- Fonts: Inter for UI, JetBrains Mono for code -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <!-- Marked.js for Markdown parsing (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js" crossorigin="anonymous"></script>
 
   <!-- Styles -->
   <link rel="stylesheet" href="style.css">
@@ -109,7 +115,7 @@
         <div class="top-bar-center">
           <div class="model-indicator" id="modelIndicator" aria-live="polite">
             <span class="model-dot" aria-hidden="true"></span>
-            <span class="model-name">Gemini 2.5 Flash</span>
+            <span class="model-name">Select Model</span>
             <svg class="model-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <polyline points="6 9 12 15 18 9"></polyline>
             </svg>
@@ -239,7 +245,7 @@
             </div>
 
             <button type="submit" class="input-btn send-btn" id="sendBtn" aria-label="Send message" disabled>
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <svg class="send-btn-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <line x1="5" y1="12" x2="19" y2="12"></line>
                 <polyline points="12 5 19 12 12 19"></polyline>
               </svg>
@@ -258,7 +264,7 @@
           </div>
 
           <!-- File input (hidden) -->
-          <input type="file" id="fileInput" accept="image/*,.txt,.pdf,.js,.ts,.json,.md,.csv,.py,.html,.css" multiple hidden>
+          <input type="file" id="fileInput" accept="image/*,.txt,.pdf,.js,.ts,.json,.md,.csv,.py,.html,.css,.json" multiple hidden>
         </form>
       </section>
     </main>
@@ -365,6 +371,17 @@
 
   <!-- Toast Container -->
   <div class="toast-container" id="toastContainer" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- Service Worker Registration -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js')
+          .then(reg => console.log('[SW] Registered:', reg.scope))
+          .catch(err => console.log('[SW] Registration failed:', err));
+      });
+    }
+  </script>
 
   <!-- Scripts -->
   <script src="script.js"></script>
