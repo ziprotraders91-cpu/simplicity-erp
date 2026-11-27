@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * Farhan Jawed - AI Agent | script.js
- * Unified FreeLLMAPI Client (model: "auto"), Vision/File Upload & Markdown
+ * Unified FreeLLMAPI Client (via Cloudflare CORS Proxy), Vision/File & Markdown
  * ============================================================================
  */
 
@@ -9,7 +9,7 @@
 
 document.addEventListener('DOMContentLoaded', () => {
   /* ==========================================================================
-     1. CONFIGURATION & UNIFIED API ENDPOINT
+     1. CONFIGURATION & UNIFIED API ENDPOINT (Via Cloudflare Proxy)
      ========================================================================== */
   const STORAGE_KEYS = {
     UNIFIED_KEY: 'fj_ai_unified_api_key',
@@ -22,8 +22,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const MAX_CHAR_LIMIT = 4000;
   const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB limit per file
 
-  // Unified FreeLLMAPI Server Endpoint & Model
-  const UNIFIED_API_URL = 'https://freellmapi-5wsm.onrender.com/v1/chat/completions';
+  // Unified FreeLLMAPI Server Endpoint via aapka Cloudflare Worker Proxy
+  const UNIFIED_API_URL = 'https://freellmapi-proxy.ziprotraders91.workers.dev/v1/chat/completions';
   const UNIFIED_MODEL_NAME = 'auto';
 
   // Exact System Prompt (hamesha messages array mein sabse pehle jayega)
@@ -857,7 +857,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /**
-   * Sends request to FreeLLMAPI Server and returns exact debug details on failure
+   * Sends request to FreeLLMAPI Server (via Cloudflare CORS Proxy)
    */
   async function callUnifiedApi(apiMessages) {
     const apiKey = (state.apiKey || '').trim();
@@ -926,10 +926,10 @@ document.addEventListener('DOMContentLoaded', () => {
         model: (data && typeof data.model === 'string' && data.model) || 'FreeLLMAPI (Auto)'
       };
     } catch (err) {
-      const msg = err && err.message ? err.message : 'Network / CORS error';
+      const msg = err && err.message ? err.message : 'Network error';
       return {
         success: false,
-        details: `Details: ${msg} (Ya toh Render server sleep/band hai, ya server par CORS allow nahi hai)`
+        details: `Details: ${msg}`
       };
     }
   }
