@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * Farhan Jawed - AI Agent | script.js
- * Complete Chat UI, Multi-Model Fallback Engine, File/Vision Upload & Markdown
+ * Smart Auto-Fallback Queue, Live OpenRouter Free Models, Vision/File & Markdown
  * ============================================================================
  */
 
@@ -9,10 +9,11 @@
 
 document.addEventListener('DOMContentLoaded', () => {
   /* ==========================================================================
-     1. CONFIGURATION & API PROVIDERS (Multi-Model Fallback Order)
+     1. CONFIGURATION & ENDPOINTS
      ========================================================================== */
   const STORAGE_KEYS = {
     API_KEYS: 'fj_ai_api_keys',
+    MODEL_MODE: 'fj_ai_model_mode',
     CHATS: 'fj_ai_chats',
     ACTIVE_CHAT_ID: 'fj_ai_active_chat_id',
     THEME: 'fj_ai_theme'
@@ -21,34 +22,35 @@ document.addEventListener('DOMContentLoaded', () => {
   const MAX_CHAR_LIMIT = 4000;
   const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB limit per file
 
+  const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
+
+  const ENDPOINTS = {
+    openrouter: 'https://openrouter.ai/api/v1/chat/completions',
+    google: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+    groq: 'https://api.groq.com/openai/v1/chat/completions'
+  };
+
+  // Queue ke aakhir mein fallback models (Google aur phir Groq)
+  const FALLBACK_TAIL_MODELS = [
+    {
+      providerId: 'google',
+      providerName: 'Google Gemini',
+      url: ENDPOINTS.google,
+      model: 'gemini-1.5-flash',
+      label: 'Google (gemini-1.5-flash)'
+    },
+    {
+      providerId: 'groq',
+      providerName: 'Groq',
+      url: ENDPOINTS.groq,
+      model: 'llama3-8b-8192',
+      label: 'Groq (llama3-8b-8192)'
+    }
+  ];
+
   const SYSTEM_PROMPT =
     'You are Farhan Jawed AI, a helpful, intelligent, and friendly personal AI assistant. ' +
     'Provide clear, accurate, well-structured responses using Markdown when helpful.';
-
-  // Exact fallback sequence: 1. Google Gemini -> 2. Groq -> 3. OpenRouter
-  const API_PROVIDERS = [
-    {
-      id: 'google',
-      name: 'Google Gemini',
-      displayModel: 'Gemini 2.5 Flash',
-      url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
-      model: 'gemini-2.5-flash'
-    },
-    {
-      id: 'groq',
-      name: 'Groq',
-      displayModel: 'GPT-OSS 120B (Groq)',
-      url: 'https://api.groq.com/openai/v1/chat/completions',
-      model: 'openai/gpt-oss-120b'
-    },
-    {
-      id: 'openrouter',
-      name: 'OpenRouter',
-      displayModel: 'Nemotron 3 Super 120B (OpenRouter)',
-      url: 'https://openrouter.ai/api/v1/chat/completions',
-      model: 'nvidia/nemotron-3-super-120b-a12b:free'
-    }
-  ];
 
   const DEFAULT_SUGGESTIONS = [
     {
@@ -128,6 +130,9 @@ document.addEventListener('DOMContentLoaded', () => {
     toastContainer: document.getElementById('toastContainer')
   };
 
+  // Dynamically injected dropdown inside Settings Modal
+  let modelModeSelectEl = null;
+
   /* ==========================================================================
      3. APPLICATION STATE
      ========================================================================== */
@@ -137,9 +142,12 @@ document.addEventListener('DOMContentLoaded', () => {
       groq: '',
       openrouter: ''
     },
+    modelMode: 'auto',          // 'auto' or 'providerId::modelId'
+    openRouterFreeModels: [],   // Fetched from OpenRouter /api/v1/models (price == 0)
+    isFetchingModels: false,
     chats: [],
     activeChatId: null,
-    pendingAttachments: [], // Array of { name, size, type, isImage, base64, textContent }
+    pendingAttachments: [],     // Array of { name, size, type, isImage, base64, textContent }
     isGenerating: false,
     theme: 'dark'
   };
@@ -151,12 +159,17 @@ document.addEventListener('DOMContentLoaded', () => {
     configureMarkdown();
     loadTheme();
     loadApiKeys();
+    loadModelMode();
+    injectModelSelectorInSettings();
     loadChats();
     renderSuggestions();
     updateModelIndicator();
     updateKeyStatusUI();
     bindEvents();
     updateInputUIState();
+
+    // App load hote hi OpenRouter se free models fetch karke memory mein save karo
+    fetchOpenRouterFreeModels();
   }
 
   function configureMarkdown() {
@@ -169,7 +182,179 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     5. EVENT LISTENERS
+     5. OPENROUTER FREE MODELS FETCH & SETTINGS DROPDOWN
+     ========================================================================== */
+  async function fetchOpenRouterFreeModels() {
+    if (state.isFetchingModels) return;
+    state.isFetchingModels = true;
+
+    try {
+      const response = await fetch(OPENROUTER_MODELS_URL, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        state.isFetchingModels = false;
+        return;
+      }
+
+      const payload = await response.json();
+      const allModels = Array.isArray(payload && payload.data) ? payload.data : [];
+
+      // Sirf wo models filter karo jinka prompt aur completion price "0" ho
+      const freeModels = allModels
+        .filter((m) => {
+          if (!m || !m.id || !m.pricing) return false;
+          const promptPrice = m.pricing.prompt;
+          const completionPrice = m.pricing.completion;
+
+          const isPromptFree =
+            promptPrice !== undefined &&
+            promptPrice !== null &&
+            parseFloat(promptPrice) === 0;
+          const isCompletionFree =
+            completionPrice !== undefined &&
+            completionPrice !== null &&
+            parseFloat(completionPrice) === 0;
+
+          if (!isPromptFree || !isCompletionFree) return false;
+
+          // Ensure model supports text output for chat completions
+          const outMods = m.architecture && m.architecture.output_modalities;
+          if (Array.isArray(outMods) && !outMods.includes('text')) return false;
+
+          return true;
+        })
+        .map((m) => {
+          const inputMods = (m.architecture && m.architecture.input_modalities) || [];
+          return {
+            id: m.id,
+            name: m.name || m.id,
+            contextLength: m.context_length || 0,
+            supportsImage: Array.isArray(inputMods) && inputMods.includes('image')
+          };
+        });
+
+      // Prefer models with ':free' suffix and higher context length first
+      freeModels.sort((a, b) => {
+        const aIsFreeTag = a.id.endsWith(':free') ? 1 : 0;
+        const bIsFreeTag = b.id.endsWith(':free') ? 1 : 0;
+        if (aIsFreeTag !== bIsFreeTag) return bIsFreeTag - aIsFreeTag;
+        return (b.contextLength || 0) - (a.contextLength || 0);
+      });
+
+      state.openRouterFreeModels = freeModels;
+      populateModelDropdownOptions();
+      updateModelIndicator();
+    } catch {
+      // Network/CORS error on background fetch handled silently without console spam
+    } finally {
+      state.isFetchingModels = false;
+    }
+  }
+
+  function loadModelMode() {
+    const saved = safeLocalStorageGet(STORAGE_KEYS.MODEL_MODE);
+    state.modelMode = saved && saved.trim() ? saved.trim() : 'auto';
+  }
+
+  function injectModelSelectorInSettings() {
+    if (!els.settingsModal) return;
+    const modalBody = els.settingsModal.querySelector('.modal-body');
+    if (!modalBody) return;
+
+    // Avoid duplicate injection
+    if (document.getElementById('modelModeSelect')) {
+      modelModeSelectEl = document.getElementById('modelModeSelect');
+      populateModelDropdownOptions();
+      return;
+    }
+
+    const group = document.createElement('div');
+    group.className = 'form-group';
+    group.id = 'modelModeGroup';
+    group.style.marginTop = '12px';
+
+    const label = document.createElement('label');
+    label.setAttribute('for', 'modelModeSelect');
+    label.textContent = 'Model Selection Mode';
+
+    const select = document.createElement('select');
+    select.id = 'modelModeSelect';
+    select.className = 'settings-input';
+    select.style.width = '100%';
+    select.style.cursor = 'pointer';
+
+    const help = document.createElement('p');
+    help.className = 'form-help';
+    help.textContent =
+      'Auto mode pehle sabhi OpenRouter free models try karta hai, phir Google (gemini-1.5-flash) aur Groq (llama3-8b-8192).';
+
+    group.appendChild(label);
+    group.appendChild(select);
+    group.appendChild(help);
+
+    if (els.keyStatus && els.keyStatus.parentNode === modalBody) {
+      modalBody.insertBefore(group, els.keyStatus);
+    } else {
+      modalBody.appendChild(group);
+    }
+
+    modelModeSelectEl = select;
+    populateModelDropdownOptions();
+  }
+
+  function populateModelDropdownOptions() {
+    if (!modelModeSelectEl) return;
+
+    modelModeSelectEl.innerHTML = '';
+
+    // 1. Default Auto Option
+    const autoOpt = document.createElement('option');
+    autoOpt.value = 'auto';
+    autoOpt.textContent = 'Auto (Best Available)';
+    modelModeSelectEl.appendChild(autoOpt);
+
+    // 2. OpenRouter Free Models Group
+    if (state.openRouterFreeModels.length > 0) {
+      const orGroup = document.createElement('optgroup');
+      orGroup.label = `OpenRouter Free Models (${state.openRouterFreeModels.length})`;
+
+      state.openRouterFreeModels.forEach((m) => {
+        const opt = document.createElement('option');
+        opt.value = `openrouter::${m.id}`;
+        opt.textContent = `${m.name} (${m.id})`;
+        orGroup.appendChild(opt);
+      });
+
+      modelModeSelectEl.appendChild(orGroup);
+    }
+
+    // 3. Direct Fallback Providers
+    const directGroup = document.createElement('optgroup');
+    directGroup.label = 'Direct Fallback Providers';
+
+    FALLBACK_TAIL_MODELS.forEach((item) => {
+      const opt = document.createElement('option');
+      opt.value = `${item.providerId}::${item.model}`;
+      opt.textContent = item.label;
+      directGroup.appendChild(opt);
+    });
+
+    modelModeSelectEl.appendChild(directGroup);
+
+    // Restore saved selection (fallback to 'auto' if saved model no longer exists)
+    const hasSavedOption = Array.from(modelModeSelectEl.options).some(
+      (o) => o.value === state.modelMode
+    );
+    modelModeSelectEl.value = hasSavedOption ? state.modelMode : 'auto';
+  }
+
+  /* ==========================================================================
+     6. EVENT LISTENERS
      ========================================================================== */
   function bindEvents() {
     // Sidebar toggles
@@ -196,7 +381,7 @@ document.addEventListener('DOMContentLoaded', () => {
       els.themeToggle.addEventListener('click', toggleTheme);
     }
 
-    // Model indicator opens settings for quick key access
+    // Model indicator opens settings
     if (els.modelIndicator) {
       els.modelIndicator.addEventListener('click', openSettingsModal);
       els.modelIndicator.style.cursor = 'pointer';
@@ -279,7 +464,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     6. THEME MANAGEMENT
+     7. THEME MANAGEMENT
      ========================================================================== */
   function loadTheme() {
     const saved = safeLocalStorageGet(STORAGE_KEYS.THEME);
@@ -304,12 +489,12 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     7. SIDEBAR & CHAT HISTORY MANAGEMENT
+     8. SIDEBAR & CHAT HISTORY MANAGEMENT
      ========================================================================== */
   function openSidebar() {
     if (els.sidebar) els.sidebar.classList.add('open');
     if (els.sidebarOverlay) {
-      els.sidebarOverlay.classList.add('active', 'open');
+      els.sidebarOverlay.classList.add('visible', 'active', 'open');
       els.sidebarOverlay.setAttribute('aria-hidden', 'false');
     }
     if (els.menuToggle) els.menuToggle.setAttribute('aria-expanded', 'true');
@@ -319,7 +504,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function closeSidebar() {
     if (els.sidebar) els.sidebar.classList.remove('open');
     if (els.sidebarOverlay) {
-      els.sidebarOverlay.classList.remove('active', 'open');
+      els.sidebarOverlay.classList.remove('visible', 'active', 'open');
       els.sidebarOverlay.setAttribute('aria-hidden', 'true');
     }
     if (els.menuToggle) els.menuToggle.setAttribute('aria-expanded', 'false');
@@ -424,7 +609,6 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderChatHistorySidebar() {
     if (!els.chatHistory) return;
 
-    // Remove existing history items while preserving #historyEmpty
     els.chatHistory.querySelectorAll('.history-item').forEach((node) => node.remove());
 
     if (state.chats.length === 0) {
@@ -515,7 +699,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     8. SETTINGS MODAL & API KEY MANAGEMENT
+     9. SETTINGS MODAL & API KEY MANAGEMENT
      ========================================================================== */
   function loadApiKeys() {
     const raw = safeLocalStorageGet(STORAGE_KEYS.API_KEYS);
@@ -545,7 +729,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function openSettingsModal() {
     populateKeyInputs();
+    populateModelDropdownOptions();
     updateKeyStatusUI();
+
+    if (state.openRouterFreeModels.length === 0) {
+      fetchOpenRouterFreeModels();
+    }
 
     if (!els.settingsModal) return;
     if (typeof els.settingsModal.showModal === 'function') {
@@ -617,30 +806,43 @@ document.addEventListener('DOMContentLoaded', () => {
       openrouter: els.openrouterKey ? els.openrouterKey.value.trim() : ''
     };
 
+    if (modelModeSelectEl) {
+      state.modelMode = modelModeSelectEl.value || 'auto';
+      safeLocalStorageSet(STORAGE_KEYS.MODEL_MODE, state.modelMode);
+    }
+
     safeLocalStorageSet(STORAGE_KEYS.API_KEYS, JSON.stringify(state.apiKeys));
     updateKeyStatusUI();
     updateModelIndicator();
     closeSettingsModal();
-    showToast('API keys saved successfully!', 'success');
+    showToast('Settings & API keys saved!', 'success');
   }
 
   function updateKeyStatusUI() {
     if (!els.keyStatus) return;
 
-    const statusHtml = API_PROVIDERS.map((provider) => {
-      const hasKey = Boolean(state.apiKeys[provider.id]);
-      const dotColor = hasKey ? '#22c55e' : '#94a3b8';
-      const statusText = hasKey ? 'Configured' : 'Not set';
-      return (
-        `<div class="key-status-item" style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-radius:8px;font-size:0.85rem;">` +
-        `<span style="display:flex;align-items:center;gap:8px;">` +
-        `<span style="width:8px;height:8px;border-radius:50%;background:${dotColor};display:inline-block;"></span>` +
-        `<span>${escapeHtml(provider.name)}</span>` +
-        `</span>` +
-        `<span style="opacity:0.8;color:${hasKey ? '#22c55e' : 'inherit'};">${statusText}</span>` +
-        `</div>`
-      );
-    }).join('');
+    const providers = [
+      { id: 'openrouter', name: 'OpenRouter', extra: `${state.openRouterFreeModels.length} free models` },
+      { id: 'google', name: 'Google Gemini', extra: 'gemini-1.5-flash' },
+      { id: 'groq', name: 'Groq', extra: 'llama3-8b-8192' }
+    ];
+
+    const statusHtml = providers
+      .map((p) => {
+        const hasKey = Boolean(state.apiKeys[p.id]);
+        const dotColor = hasKey ? '#22c55e' : '#94a3b8';
+        const statusText = hasKey ? `Configured (${p.extra})` : 'Not set';
+        return (
+          `<div class="key-status-item" style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-radius:8px;font-size:0.85rem;">` +
+          `<span style="display:flex;align-items:center;gap:8px;">` +
+          `<span style="width:8px;height:8px;border-radius:50%;background:${dotColor};display:inline-block;"></span>` +
+          `<span>${escapeHtml(p.name)}</span>` +
+          `</span>` +
+          `<span style="opacity:0.8;color:${hasKey ? '#22c55e' : 'inherit'};">${escapeHtml(statusText)}</span>` +
+          `</div>`
+        );
+      })
+      .join('');
 
     els.keyStatus.innerHTML = statusHtml;
   }
@@ -657,18 +859,31 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    const firstAvailable = API_PROVIDERS.find((p) => Boolean(state.apiKeys[p.id]));
-    if (firstAvailable) {
-      nameEl.textContent = firstAvailable.displayModel;
-      if (dotEl) dotEl.style.backgroundColor = '#22c55e';
-    } else {
+    const hasAnyKey = Boolean(
+      state.apiKeys.openrouter || state.apiKeys.google || state.apiKeys.groq
+    );
+
+    if (!hasAnyKey) {
       nameEl.textContent = 'Add API Key';
       if (dotEl) dotEl.style.backgroundColor = '#f59e0b';
+      return;
+    }
+
+    if (state.modelMode === 'auto') {
+      const freeCount = state.openRouterFreeModels.length;
+      nameEl.textContent = freeCount > 0
+        ? `Auto (${freeCount} Free + Fallbacks)`
+        : 'Auto (Best Available)';
+      if (dotEl) dotEl.style.backgroundColor = '#22c55e';
+    } else {
+      const parts = state.modelMode.split('::');
+      nameEl.textContent = parts[1] || state.modelMode;
+      if (dotEl) dotEl.style.backgroundColor = '#22c55e';
     }
   }
 
   /* ==========================================================================
-     9. FILE & IMAGE ATTACHMENT HANDLING
+     10. FILE & IMAGE ATTACHMENT HANDLING
      ========================================================================== */
   async function handleFileSelection(e) {
     const files = Array.from(e.target.files || []);
@@ -707,7 +922,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
 
-    // Reset file input so selecting the same file again triggers 'change'
     if (els.fileInput) els.fileInput.value = '';
     renderAttachmentPreview();
     updateInputUIState();
@@ -782,7 +996,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     10. CHAT MESSAGING & MULTI-MODEL FALLBACK ENGINE
+     11. SMART AUTO-FALLBACK QUEUE & CHAT MESSAGING ENGINE
      ========================================================================== */
   async function handleSendMessage(overrideText) {
     if (state.isGenerating) return;
@@ -795,7 +1009,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (!trimmedText && attachments.length === 0) return;
 
-    // Handle quick slash commands
+    // Quick slash commands
     if (trimmedText.startsWith('/') && attachments.length === 0) {
       if (handleSlashCommand(trimmedText)) {
         if (els.messageInput) {
@@ -816,7 +1030,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     hideWelcomeState();
 
-    // Build user message object for UI & history
+    // Build user message object
     const userMessageObj = {
       role: 'user',
       text: trimmedText,
@@ -830,40 +1044,53 @@ document.addEventListener('DOMContentLoaded', () => {
       timestamp: Date.now()
     };
 
-    // Append user message to chat & DOM
+    // Save & render user message
     chat.messages.push(userMessageObj);
     chat.updatedAt = Date.now();
     saveChats();
     appendMessageToDOM(userMessageObj);
 
-    // Clear input & attachments immediately
+    // Clear input & attachments
     if (els.messageInput && typeof overrideText !== 'string') {
       els.messageInput.value = '';
       autoResizeTextarea();
     }
     clearAttachments();
 
-    // Lock UI & show typing indicator
+    // Lock UI & create live switching status message in chat
     setGeneratingState(true);
     showTypingIndicator();
+    const statusBubbleCtrl = createLiveStatusMessage();
     scrollToBottom();
 
-    // Prepare API payload messages (including full history + current attachments)
+    // If user chose Auto and free models list isn't loaded yet, try fetching once
+    if (state.modelMode === 'auto' && state.openRouterFreeModels.length === 0) {
+      statusBubbleCtrl.update('Connecting... (Fetching free OpenRouter models)');
+      await fetchOpenRouterFreeModels();
+    }
+
+    const hasImageAttachment = attachments.some((a) => a.isImage && a.base64);
+    const modelQueue = buildModelQueue(hasImageAttachment);
     const apiMessages = buildApiMessages(chat.messages, attachments);
 
-    // Execute Multi-Key Fallback Loop
-    const result = await callWithFallback(apiMessages);
+    // Execute Smart Auto-Fallback while-loop queue
+    const result = await executeModelQueue(modelQueue, apiMessages, (statusText) => {
+      statusBubbleCtrl.update(statusText);
+      scrollToBottom();
+    });
 
+    // Remove temporary "Connecting... (Trying model X)" indicator
+    statusBubbleCtrl.remove();
     hideTypingIndicator();
     setGeneratingState(false);
 
     if (result.success) {
-      updateModelIndicator(result.provider.displayModel);
+      updateModelIndicator(result.candidate.model);
 
       const assistantMsg = {
         role: 'assistant',
         text: result.content,
-        model: result.provider.displayModel,
+        model: result.candidate.label,
         isError: false,
         timestamp: Date.now()
       };
@@ -873,11 +1100,11 @@ document.addEventListener('DOMContentLoaded', () => {
       saveChats();
       appendMessageToDOM(assistantMsg);
     } else {
-      // Sabhi API fail hone par red error message aur provider-wise debug details dikhana
-      const errorText = 'Error: Saari API limits khatam hain ya keys galat hain.';
+      updateModelIndicator();
+
       const errorMsg = {
         role: 'assistant',
-        text: errorText,
+        text: 'Sabhi models busy hain, thodi der baad try karein',
         errorDetails: result.details,
         isError: true,
         timestamp: Date.now()
@@ -892,6 +1119,224 @@ document.addEventListener('DOMContentLoaded', () => {
     scrollToBottom();
     renderChatHistorySidebar();
     updateInputUIState();
+  }
+
+  /**
+   * Builds the Priority Queue:
+   * - In 'auto' mode:
+   *   1) All fetched OpenRouter Free Models (if image attached, vision-capable first)
+   *   2) Google (gemini-1.5-flash)
+   *   3) Groq (llama3-8b-8192)
+   * - In manual mode:
+   *   Tries the user's selected model directly.
+   */
+  function buildModelQueue(hasImageAttachment) {
+    const queue = [];
+
+    if (state.modelMode && state.modelMode !== 'auto' && state.modelMode.includes('::')) {
+      const [providerId, ...rest] = state.modelMode.split('::');
+      const modelId = rest.join('::');
+      if (ENDPOINTS[providerId] && modelId) {
+        queue.push({
+          providerId,
+          providerName: providerId.toUpperCase(),
+          url: ENDPOINTS[providerId],
+          model: modelId,
+          label: `${providerId} (${modelId})`
+        });
+        return queue;
+      }
+    }
+
+    // 1. OpenRouter Free Models first
+    if (state.openRouterFreeModels.length > 0) {
+      const orderedFree = hasImageAttachment
+        ? [
+            ...state.openRouterFreeModels.filter((m) => m.supportsImage),
+            ...state.openRouterFreeModels.filter((m) => !m.supportsImage)
+          ]
+        : state.openRouterFreeModels;
+
+      orderedFree.forEach((m) => {
+        queue.push({
+          providerId: 'openrouter',
+          providerName: 'OpenRouter',
+          url: ENDPOINTS.openrouter,
+          model: m.id,
+          label: `OpenRouter (${m.id})`
+        });
+      });
+    }
+
+    // 2. Tail Fallbacks: Google (gemini-1.5-flash) -> Groq (llama3-8b-8192)
+    FALLBACK_TAIL_MODELS.forEach((tail) => {
+      queue.push({ ...tail });
+    });
+
+    return queue;
+  }
+
+  /**
+   * Solid while-loop + try-catch executor across the model queue.
+   * Immediately advances to the next model on 429, 404, 500, 400, or network/CORS errors.
+   */
+  async function executeModelQueue(queue, apiMessages, onStatusUpdate) {
+    const errorLog = [];
+    let anyKeyConfigured = false;
+    let openRouterAuthFailed = false;
+    let index = 0;
+
+    while (index < queue.length) {
+      const candidate = queue[index];
+      index += 1;
+
+      const apiKey = (state.apiKeys[candidate.providerId] || '').trim();
+      if (!apiKey) {
+        errorLog.push(`${candidate.label}: API key missing`);
+        continue;
+      }
+
+      // If OpenRouter key itself is invalid (401), skip remaining OpenRouter models
+      if (candidate.providerId === 'openrouter' && openRouterAuthFailed) {
+        continue;
+      }
+
+      anyKeyConfigured = true;
+
+      // Update live UI: "Connecting... (Trying model X)"
+      if (typeof onStatusUpdate === 'function') {
+        onStatusUpdate(`Connecting... (Trying model ${candidate.model})`);
+      }
+      updateModelIndicator(`Trying ${candidate.model}...`);
+
+      try {
+        const headers = {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        };
+
+        if (candidate.providerId === 'openrouter') {
+          headers['HTTP-Referer'] = window.location.origin || 'http://localhost';
+          headers['X-Title'] = 'Farhan Jawed AI Agent';
+        }
+
+        const response = await fetch(candidate.url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            model: candidate.model,
+            messages: apiMessages,
+            temperature: 0.7
+          })
+        });
+
+        if (!response.ok) {
+          let apiErrMessage = '';
+          try {
+            const errJson = await response.json();
+            if (Array.isArray(errJson) && errJson[0]?.error?.message) {
+              apiErrMessage = errJson[0].error.message;
+            } else if (errJson?.error?.message) {
+              apiErrMessage = errJson.error.message;
+            } else if (typeof errJson?.message === 'string') {
+              apiErrMessage = errJson.message;
+            }
+          } catch {
+            // Non-JSON error body
+          }
+
+          if (candidate.providerId === 'openrouter' && response.status === 401) {
+            openRouterAuthFailed = true;
+          }
+
+          const reason = getHttpErrorReason(response.status, apiErrMessage);
+          errorLog.push(`${candidate.label}: ${reason}`);
+          continue; // Turant agle model par jao (429, 404, 500, etc.)
+        }
+
+        const data = await response.json();
+        const choiceContent = extractAssistantText(data);
+
+        if (!choiceContent) {
+          errorLog.push(`${candidate.label}: Empty response received`);
+          continue;
+        }
+
+        // Valid response mila -> loop khatam aur answer return karo
+        return {
+          success: true,
+          candidate,
+          content: choiceContent
+        };
+      } catch (networkOrCorsErr) {
+        const errMsg =
+          networkOrCorsErr && networkOrCorsErr.message
+            ? networkOrCorsErr.message
+            : 'Network or CORS error';
+        errorLog.push(`${candidate.label}: ${errMsg}`);
+        continue; // Error aane par agle model par jao
+      }
+    }
+
+    return {
+      success: false,
+      details: anyKeyConfigured
+        ? errorLog.slice(0, 8).map((entry) => `• ${entry}`).join('\n') +
+          (errorLog.length > 8 ? `\n• ...and ${errorLog.length - 8} more failed attempts` : '')
+        : 'Koi bhi API key set nahi hai. Settings icon par click karke apni key daalein.'
+    };
+  }
+
+  function createLiveStatusMessage() {
+    const statusEl = document.createElement('div');
+    statusEl.className = 'message message-assistant assistant live-status-message';
+    statusEl.setAttribute('aria-live', 'polite');
+
+    const avatarEl = document.createElement('div');
+    avatarEl.className = 'message-avatar';
+    avatarEl.setAttribute('aria-hidden', 'true');
+    avatarEl.innerHTML =
+      '<svg width="18" height="18" viewBox="0 0 32 32" fill="none">' +
+      '<circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2"/>' +
+      '<path d="M10 16c0-3.3 2.7-6 6-6s6 2.7 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+
+    const contentWrapper = document.createElement('div');
+    contentWrapper.className = 'message-content';
+
+    const bubbleEl = document.createElement('div');
+    bubbleEl.className = 'message-bubble';
+    bubbleEl.style.cssText =
+      'display:inline-flex;align-items:center;gap:10px;padding:10px 14px;' +
+      'font-size:0.88rem;color:#c4b5fd;border-color:rgba(139,92,246,0.4);';
+
+    const pulseDot = document.createElement('span');
+    pulseDot.style.cssText =
+      'width:8px;height:8px;border-radius:50%;background:#8b5cf6;flex-shrink:0;' +
+      'box-shadow:0 0 10px #8b5cf6;';
+
+    const textSpan = document.createElement('span');
+    textSpan.textContent = 'Connecting...';
+
+    bubbleEl.appendChild(pulseDot);
+    bubbleEl.appendChild(textSpan);
+    contentWrapper.appendChild(bubbleEl);
+    statusEl.appendChild(avatarEl);
+    statusEl.appendChild(contentWrapper);
+
+    if (els.messagesList) {
+      els.messagesList.appendChild(statusEl);
+    }
+
+    return {
+      update(newText) {
+        textSpan.textContent = newText;
+      },
+      remove() {
+        if (statusEl.parentNode) {
+          statusEl.parentNode.removeChild(statusEl);
+        }
+      }
+    };
   }
 
   function handleSlashCommand(cmd) {
@@ -912,7 +1357,7 @@ document.addEventListener('DOMContentLoaded', () => {
         text:
           '**Available Commands:**\n' +
           '- `/new` or `/clear` — Start a fresh conversation\n' +
-          '- `/settings` or `/keys` — Open API key settings\n' +
+          '- `/settings` or `/keys` — Open API key & model settings\n' +
           '- `/help` — Show this command list',
         model: 'System',
         isError: false,
@@ -924,17 +1369,11 @@ document.addEventListener('DOMContentLoaded', () => {
     return false;
   }
 
-  /**
-   * Formats conversation history + current attachments into OpenAI-compatible messages
-   */
   function buildApiMessages(chatMessages, currentAttachments) {
     const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
-
-    // Take last 20 messages to stay comfortably within context limits
     const recentHistory = chatMessages.slice(-20);
 
     recentHistory.forEach((msg, index) => {
-      // Skip previous error alerts from context sent to AI
       if (msg.isError) return;
 
       const isLastUserMessage = index === recentHistory.length - 1 && msg.role === 'user';
@@ -947,7 +1386,6 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
 
-      // Build user message text including any attached text/code files
       let combinedText = msg.text || '';
       const msgAttachments = isLastUserMessage && currentAttachments.length > 0
         ? currentAttachments
@@ -963,7 +1401,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const imageFiles = msgAttachments.filter((a) => a.isImage && a.base64);
 
-      // Only send OpenAI Vision array format if an image is attached
       if (imageFiles.length > 0) {
         const contentParts = [
           {
@@ -983,7 +1420,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         messages.push({ role: 'user', content: contentParts });
       } else {
-        // Ensure non-empty string content so Google/Groq/OpenRouter never reject with 400
         messages.push({ role: 'user', content: combinedText || '[Attached image]' });
       }
     });
@@ -991,118 +1427,20 @@ document.addEventListener('DOMContentLoaded', () => {
     return messages;
   }
 
-  /**
-   * Maps HTTP status codes to clear debugging labels
-   */
   function getHttpErrorReason(status, apiMessage) {
     const statusMap = {
       400: 'Bad Request',
       401: 'Invalid API Key (Unauthorized)',
       403: 'Access Denied (Forbidden)',
       404: 'Model not found',
-      429: 'Rate limit exceeded (Quota khatam)',
+      429: 'Rate limit exceeded (Busy)',
       500: 'Server Error',
       502: 'Bad Gateway',
       503: 'Service Unavailable'
     };
 
     const baseReason = statusMap[status] || `HTTP ${status}`;
-    if (apiMessage) {
-      return `${baseReason} - ${apiMessage}`;
-    }
-    return baseReason;
-  }
-
-  /**
-   * Loops through Google -> Groq -> OpenRouter with automatic fallback on errors.
-   * Captures exact provider + failure reason for easy debugging (no console logging).
-   */
-  async function callWithFallback(apiMessages) {
-    const errorLog = [];
-    let anyKeyConfigured = false;
-
-    for (const provider of API_PROVIDERS) {
-      const apiKey = (state.apiKeys[provider.id] || '').trim();
-      if (!apiKey) {
-        errorLog.push(`${provider.name}: API key missing`);
-        continue;
-      }
-
-      anyKeyConfigured = true;
-
-      try {
-        const headers = {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        };
-
-        // OpenRouter recommended headers
-        if (provider.id === 'openrouter') {
-          headers['HTTP-Referer'] = window.location.origin || 'http://localhost';
-          headers['X-Title'] = 'Farhan Jawed AI Agent';
-        }
-
-        // Standard OpenAI-compatible payload (no 'store' parameter so Google Gemini accepts it)
-        const requestBody = {
-          model: provider.model,
-          messages: apiMessages,
-          temperature: 0.7
-        };
-
-        const response = await fetch(provider.url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(requestBody)
-        });
-
-        if (!response.ok) {
-          let apiErrMessage = '';
-          try {
-            const errJson = await response.json();
-            if (Array.isArray(errJson) && errJson[0] && errJson[0].error && errJson[0].error.message) {
-              apiErrMessage = errJson[0].error.message;
-            } else if (errJson && errJson.error && errJson.error.message) {
-              apiErrMessage = errJson.error.message;
-            } else if (errJson && typeof errJson.message === 'string') {
-              apiErrMessage = errJson.message;
-            }
-          } catch {
-            // Ignore JSON parse error on non-JSON error responses
-          }
-
-          const reason = getHttpErrorReason(response.status, apiErrMessage);
-          errorLog.push(`${provider.name}: ${reason}`);
-          continue; // Try next fallback provider
-        }
-
-        const data = await response.json();
-        const choiceContent = extractAssistantText(data);
-
-        if (!choiceContent) {
-          errorLog.push(`${provider.name}: Empty response received`);
-          continue;
-        }
-
-        return {
-          success: true,
-          provider,
-          content: choiceContent
-        };
-      } catch (networkOrCorsErr) {
-        // Handle CORS / Network errors gracefully without logging to console
-        const msg = networkOrCorsErr && networkOrCorsErr.message
-          ? networkOrCorsErr.message
-          : 'Network or CORS error';
-        errorLog.push(`${provider.name}: ${msg}`);
-      }
-    }
-
-    return {
-      success: false,
-      details: anyKeyConfigured
-        ? errorLog.map((entry) => `• ${entry}`).join('\n')
-        : 'Koi bhi API key set nahi hai. Settings icon par click karke apni key daalein.'
-    };
+    return apiMessage ? `${baseReason} - ${apiMessage}` : baseReason;
   }
 
   function extractAssistantText(data) {
@@ -1126,7 +1464,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     11. MESSAGE RENDERING, MARKDOWN & CODE BLOCK COPY BUTTONS
+     12. MESSAGE RENDERING, MARKDOWN & CODE BLOCK COPY BUTTONS
      ========================================================================== */
   function appendMessageToDOM(msg) {
     if (!els.messagesList) return;
@@ -1135,7 +1473,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const messageEl = document.createElement('div');
     messageEl.className =
       'message ' +
-      (isUser ? 'message-user' : 'message-assistant') +
+      (isUser ? 'message-user user' : 'message-assistant assistant') +
       (msg.isError ? ' message-error' : '');
 
     // Avatar
@@ -1155,7 +1493,6 @@ document.addEventListener('DOMContentLoaded', () => {
     bubbleEl.className = 'message-bubble';
 
     if (msg.isError) {
-      // Guaranteed red styling for API / Network / CORS error messages
       bubbleEl.style.cssText =
         'color: #ef4444; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 12px; padding: 12px 16px;';
       const errTitle = document.createElement('p');
@@ -1166,12 +1503,11 @@ document.addEventListener('DOMContentLoaded', () => {
       if (msg.errorDetails) {
         const errDetail = document.createElement('p');
         errDetail.style.cssText =
-          'margin: 8px 0 0; font-size: 0.82rem; line-height: 1.5; opacity: 0.95; color: #f87171; white-space: pre-line;';
+          'margin: 8px 0 0; font-size: 0.8rem; line-height: 1.5; opacity: 0.95; color: #f87171; white-space: pre-line;';
         errDetail.textContent = msg.errorDetails;
         bubbleEl.appendChild(errDetail);
       }
     } else if (isUser) {
-      // Show attached images/files cleanly inside user bubble
       if (Array.isArray(msg.attachments) && msg.attachments.length > 0) {
         const attContainer = document.createElement('div');
         attContainer.className = 'message-attachments';
@@ -1204,7 +1540,6 @@ document.addEventListener('DOMContentLoaded', () => {
         bubbleEl.appendChild(textDiv);
       }
     } else {
-      // Assistant message rendered via Marked.js + Copy buttons on code blocks
       const markdownDiv = document.createElement('div');
       markdownDiv.className = 'message-markdown';
       markdownDiv.innerHTML = renderMarkdownSafe(msg.text || '');
@@ -1214,7 +1549,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     contentWrapper.appendChild(bubbleEl);
 
-    // Optional model label under AI response
     if (!isUser && msg.model && !msg.isError) {
       const metaEl = document.createElement('div');
       metaEl.className = 'message-meta';
@@ -1236,7 +1570,6 @@ document.addEventListener('DOMContentLoaded', () => {
       html = escapeHtml(markdownText).replace(/\n/g, '<br>');
     }
 
-    // Basic XSS sanitization while preserving code blocks and formatting
     const temp = document.createElement('div');
     temp.innerHTML = html;
 
@@ -1326,7 +1659,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     12. UI HELPERS (Suggestions, Typing Indicator, Toasts, Scrolling)
+     13. UI HELPERS (Suggestions, Typing Indicator, Toasts, Scrolling)
      ========================================================================== */
   function renderSuggestions() {
     if (!els.welcomeSuggestions) return;
@@ -1427,7 +1760,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!els.toastContainer) return;
 
     const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
+    toast.className = `toast ${type} toast-${type}`;
     toast.setAttribute('role', 'status');
     toast.textContent = message;
 
@@ -1473,7 +1806,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       localStorage.setItem(key, value);
     } catch {
-      // Ignore quota or privacy-mode storage errors
+      // Ignore storage quota or privacy-mode errors
     }
   }
 
