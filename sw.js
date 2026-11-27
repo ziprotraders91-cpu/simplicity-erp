@@ -1,184 +1,201 @@
-/*
- * sw.js - Service Worker for Farhan Jawed - AI Agent PWA
- * Handles offline caching and "Add to Home Screen" installation
+/**
+ * Service Worker for Farhan Jawed - AI Agent
+ * Provides offline caching and PWA installability
  */
 
-/* ==============================================================
-   Configuration
-   ============================================================== */
-
-const CACHE_NAME = 'farhan-jawed-ai-v1';
-const PRECACHE = [
+const CACHE_NAME = 'fjai-v2';
+const STATIC_ASSETS = [
   './',
   './index.html',
   './style.css',
   './script.js',
   './manifest.json',
-  './sw.js',
 ];
 
-/* ==============================================================
-   Install Event - Precache essential assets
-   ============================================================== */
+// Assets that can fail without breaking the app
+const OPTIONAL_ASSETS = [
+  'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap',
+  'https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js',
+];
 
+// Install event - cache static assets
 self.addEventListener('install', (event) => {
-  // Wait until precaching is complete
-  self.skipWaiting();
+  console.log('[SW] Installing...');
 
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then((cache) => {
-        console.log('Precaching shell assets');
-        return cache.addAll(PRECACHE);
+        console.log('[SW] Caching static assets');
+        return cache.addAll(STATIC_ASSETS);
       })
       .then(() => {
-        console.log('Shell assets precached successfully');
+        console.log('[SW] Static assets cached');
+        return self.skipWaiting();
       })
       .catch((error) => {
-        console.error('Failed to precache:', error);
+        console.error('[SW] Cache install failed:', error);
       })
   );
-
-  // Ensure the service worker activates immediately
-  event.waitUntil(self.clients.claim());
 });
 
-/* ==============================================================
-   Activate Event - Clean up old caches
-   ============================================================== */
-
+// Activate event - clean up old caches
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cache) => {
-          if (cache !== CACHE_NAME) {
-            console.log('Deleting old cache:', cache);
-            return caches.delete(cache);
-          }
-        })
-      );
-    })
-  );
+  console.log('[SW] Activating...');
 
-  // Take control of all clients immediately
-  event.waitUntil(clients.claim());
+  event.waitUntil(
+    caches.keys()
+      .then((cacheNames) => {
+        return Promise.all(
+          cacheNames
+            .filter((name) => name !== CACHE_NAME)
+            .map((name) => {
+              console.log('[SW] Deleting old cache:', name);
+              return caches.delete(name);
+            })
+        );
+      })
+      .then(() => {
+        console.log('[SW] Activated');
+        return self.clients.claim();
+      })
+  );
 });
 
-/* ==============================================================
-   Fetch Event - Serve from cache, fallback to network
-   ============================================================== */
-
+// Fetch event - serve from cache, fallback to network
 self.addEventListener('fetch', (event) => {
-  // Only handle same-origin requests for our app
-  if (event.request.method !== 'GET') return;
+  const { request } = event;
+  const url = new URL(request.url);
 
-  const url = new URL(event.request.url);
+  // Skip non-GET requests
+  if (request.method !== 'GET') return;
 
-  // Skip non-app assets (third-party APIs, etc.)
-  if (url.origin !== self.location.origin && url.origin !== 'https://generativelanguage.googleapis.com') {
-    // Let network handle external APIs
+  // Skip cross-origin requests (API calls, fonts, etc.)
+  if (url.origin !== location.origin) {
+    // For CDN resources, try network first then cache
+    if (url.hostname === 'cdn.jsdelivr.net' || url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
+      event.respondWith(networkFirstThenCache(request));
+    }
     return;
   }
 
-  event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      // Return cached version if available
-      if (cachedResponse) {
-        return cachedResponse;
-      }
-
-      // Otherwise, fetch from network
-      return fetch(event.request).then((networkResponse) => {
-        // Don't cache if not ok
-        if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'basic') {
-          return networkResponse;
-        }
-
-        // Clone the response
-        const responseToClone = networkResponse.clone();
-
-        caches.open(CACHE_NAME).then((cache) => {
-          cache.put(event.request, responseToClone);
-        });
-
-        return networkResponse;
-      }).catch(() => {
-        // Fallback for navigation requests - show offline page
-        if (event.request.mode === 'navigate') {
-          return caches.match('./index.html');
-        }
-      });
-    })
-  );
+  // For same-origin requests, use cache-first strategy
+  event.respondWith(cacheFirstThenNetwork(request));
 });
 
-/* ==============================================================
-   Push Notification Event (optional - can add later)
-   ============================================================== */
+// Cache-first strategy (for static assets)
+async function cacheFirstThenNetwork(request) {
+  const cachedResponse = await caches.match(request);
 
-self.addEventListener('push', (event) => {
-  const data = event.data ? event.data.json() : {};
-  const title = data.title || 'Farhan Jawed - AI Agent';
-  const options = {
-    body: data.body || 'You have a new message',
-    icon: 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%230a0c2d/%3E%3Ctext x=%2220%22 y=%2255%22 font-family=%22Arial%20Bold%22 font-size=%2240%22 fill=%23ffffff%3EFJA%3C/text%3E%3C/svg%3E',
-    badge: 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 72 72%22><rect width=%2272%22 height=%2272%22 fill=%230a0c2d/%3E%3Ctext x=%2236%22 y=%2248%22 font-family=%22Arial%20Bold%22 font-size=%2216%22 fill=%233b82f6%3EFJA%3C/text%3E%3C/svg%3E',
-    vibrate: [100, 50, 100],
-    data: {
-      dateOfArrival: Date.now(),
-    },
-  };
+  if (cachedResponse) {
+    return cachedResponse;
+  }
 
-  event.waitUntil(self.registration.showNotification(title, options));
+  try {
+    const networkResponse = await fetch(request);
+
+    // Cache successful responses
+    if (networkResponse.ok) {
+      const cache = await caches.open(CACHE_NAME);
+      cache.put(request, networkResponse.clone());
+    }
+
+    return networkResponse;
+  } catch (error) {
+    console.log('[SW] Network failed, serving offline page:', error);
+
+    // Return offline page for navigation requests
+    if (request.mode === 'navigate') {
+      return caches.match('./index.html');
+    }
+
+    throw error;
+  }
+}
+
+// Network-first strategy (for CDN resources)
+async function networkFirstThenCache(request) {
+  try {
+    const networkResponse = await fetch(request);
+
+    if (networkResponse.ok) {
+      const cache = await caches.open(CACHE_NAME);
+      cache.put(request, networkResponse.clone());
+    }
+
+    return networkResponse;
+  } catch (error) {
+    console.log('[SW] CDN network failed, trying cache:', error);
+    const cachedResponse = await caches.match(request);
+    if (cachedResponse) return cachedResponse;
+    throw error;
+  }
+}
+
+// Handle messages from client
+self.addEventListener('message', (event) => {
+  if (event.data === 'skipWaiting') {
+    self.skipWaiting();
+  }
+
+  if (event.data === 'clearCache') {
+    caches.delete(CACHE_NAME).then(() => {
+      event.ports[0]?.postMessage({ success: true });
+    });
+  }
 });
 
-/* ==============================================================
-   Notification Click Event
-   ============================================================== */
-
-self.addEventListener('notificationclick', (event) => {
-  event.notification.close();
-
-  // Open the app
-  event.waitUntil(
-    clients.matchAll({ type: 'window' }).then((clientList) => {
-      // If there's already a window open, focus it
-      for (const client of clientList) {
-        if (client.url === './index.html' && !client.focused) {
-          client.focus();
-          return;
-        }
-      }
-      // Otherwise, open a new window
-      if (clients.openWindow) {
-        clients.openWindow('./index.html');
-      }
-    })
-  );
-});
-
-/* ==============================================================
-   Background Sync (optional for message queuing)
-   ============================================================== */
-
+// Background sync for offline messages (future enhancement)
 self.addEventListener('sync', (event) => {
   if (event.tag === 'sync-messages') {
     event.waitUntil(syncMessages());
   }
 });
 
-/* ==============================================================
-   Helper: Sync messages from localStorage
-   ============================================================== */
-
 async function syncMessages() {
-  // Could implement message queuing for offline mode
-  console.log('Syncing messages...');
+  // Placeholder for future offline message sync
+  console.log('[SW] Background sync triggered');
 }
 
-/* ==============================================================
-   Console log for debugging
-   ============================================================== */
+// Push notifications (future enhancement)
+self.addEventListener('push', (event) => {
+  if (!event.data) return;
 
-console.log('[Farhan Jawed AI] Service Worker registered and active');
+  const data = event.data.json();
+  const options = {
+    body: data.body || 'New message from Farhan Jawed AI',
+    icon: './icons/icon-192.png',
+    badge: './icons/icon-192.png',
+    vibrate: [100, 50, 100],
+    data: data.data || {},
+    actions: [
+      { action: 'open', title: 'Open' },
+      { action: 'close', title: 'Dismiss' },
+    ],
+  };
+
+  event.waitUntil(
+    self.registration.showNotification(data.title || 'Farhan Jawed AI', options)
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+
+  if (event.action === 'open' || !event.action) {
+    event.waitUntil(
+      clients.matchAll({ type: 'window', includeUncontrolled: true })
+        .then((clientList) => {
+          // Focus existing window
+          for (const client of clientList) {
+            if (client.url.includes(self.location.origin) && 'focus' in client) {
+              return client.focus();
+            }
+          }
+          // Open new window
+          return clients.openWindow('./index.html');
+        })
+    );
+  }
+});
+
+console.log('[SW] Service Worker loaded');
