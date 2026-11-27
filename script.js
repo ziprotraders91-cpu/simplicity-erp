@@ -1,17 +1,69 @@
 /**
- * Farhan Jawed - AI Agent | UI Logic Only (Part 1)
- * Handles all frontend interactions: sidebar, modal, tabs, inputs, toasts, etc.
- * No API calls - that comes in Part 2
+ * Farhan Jawed - AI Agent | Part 2: Full AI Integration
+ * Features: Multi-key fallback, Markdown rendering, File/Image upload, Chat persistence, PWA
  */
 
 (() => {
   'use strict';
 
   // ============================================================
+  // Configuration - API Providers
+  // ============================================================
+  const PROVIDERS = [
+    {
+      id: 'google',
+      name: 'Google Gemini',
+      model: 'gemini-2.5-flash',
+      endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+      keyStorage: 'fjai_key_google',
+      supportsVision: true,
+      formatRequest: (messages, model) => ({
+        model,
+        messages,
+        temperature: 0.7,
+        max_tokens: 8192,
+      }),
+      extractContent: (data) => data.choices?.[0]?.message?.content,
+      isError: (response) => response.status === 429 || response.status >= 400,
+    },
+    {
+      id: 'groq',
+      name: 'Groq',
+      model: 'llama-3.3-70b-versatile',
+      endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+      keyStorage: 'fjai_key_groq',
+      supportsVision: false,
+      formatRequest: (messages, model) => ({
+        model,
+        messages,
+        temperature: 0.7,
+        max_tokens: 8192,
+      }),
+      extractContent: (data) => data.choices?.[0]?.message?.content,
+      isError: (response) => response.status === 429 || response.status >= 400,
+    },
+    {
+      id: 'openrouter',
+      name: 'OpenRouter',
+      model: 'meta-llama/llama-3.3-70b-instruct:free',
+      endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+      keyStorage: 'fjai_key_openrouter',
+      supportsVision: true,
+      formatRequest: (messages, model) => ({
+        model,
+        messages,
+        temperature: 0.7,
+        max_tokens: 8192,
+      }),
+      extractContent: (data) => data.choices?.[0]?.message?.content,
+      isError: (response) => response.status === 429 || response.status >= 400,
+    },
+  ];
+
+  // ============================================================
   // DOM Element References
   // ============================================================
   const els = {
-    // Sidebar
     sidebar: document.getElementById('sidebar'),
     sidebarOverlay: document.getElementById('sidebarOverlay'),
     menuToggle: document.getElementById('menuToggle'),
@@ -20,18 +72,15 @@
     chatHistory: document.getElementById('chatHistory'),
     historyEmpty: document.getElementById('historyEmpty'),
 
-    // Top Bar
     settingsTrigger: document.getElementById('settingsTrigger'),
     themeToggle: document.getElementById('themeToggle'),
     modelIndicator: document.getElementById('modelIndicator'),
 
-    // Chat Window
     welcomeState: document.getElementById('welcomeState'),
     welcomeSuggestions: document.getElementById('welcomeSuggestions'),
     messagesList: document.getElementById('messagesList'),
     typingIndicator: document.getElementById('typingIndicator'),
 
-    // Input Area
     inputForm: document.getElementById('inputForm'),
     messageInput: document.getElementById('messageInput'),
     sendBtn: document.getElementById('sendBtn'),
@@ -44,7 +93,6 @@
     previewRemove: document.getElementById('previewRemove'),
     charCount: document.getElementById('charCount'),
 
-    // Settings Modal
     settingsModal: document.getElementById('settingsModal'),
     modalBackdrop: document.getElementById('modalBackdrop'),
     modalClose: document.getElementById('modalClose'),
@@ -53,7 +101,6 @@
     tabBtns: document.querySelectorAll('.tab-btn'),
     tabPanels: document.querySelectorAll('.tab-panel'),
 
-    // API Key Inputs
     googleKey: document.getElementById('googleKey'),
     groqKey: document.getElementById('groqKey'),
     openrouterKey: document.getElementById('openrouterKey'),
@@ -61,10 +108,8 @@
     toggleGroqKey: document.getElementById('toggleGroqKey'),
     toggleOpenRouterKey: document.getElementById('toggleOpenRouterKey'),
 
-    // Key Status
     keyStatus: document.getElementById('keyStatus'),
 
-    // Toast
     toastContainer: document.getElementById('toastContainer'),
   };
 
@@ -77,8 +122,11 @@
     activeTab: 'google',
     attachedFiles: [],
     currentChatId: null,
+    isStreaming: false,
+    abortController: null,
     chats: JSON.parse(localStorage.getItem('fjai_chats') || '[]'),
     theme: localStorage.getItem('fjai_theme') || 'dark',
+    currentProvider: null,
   };
 
   // ============================================================
@@ -87,12 +135,34 @@
   function init() {
     loadTheme();
     loadKeys();
+    configureMarked();
     renderChatHistory();
     renderWelcomeSuggestions();
     updateKeyStatus();
+    updateModelIndicator();
     bindEvents();
     autoResizeTextarea();
     updateCharCount();
+
+    // Restore last chat or show welcome
+    if (state.chats.length > 0 && !state.currentChatId) {
+      const lastChat = state.chats[0];
+      loadChat(lastChat.id);
+    }
+  }
+
+  // ============================================================
+  // Configure Marked.js
+  // ============================================================
+  function configureMarked() {
+    if (typeof marked !== 'undefined') {
+      marked.setOptions({
+        breaks: true,
+        gfm: true,
+        headerIds: false,
+        mangle: false,
+      });
+    }
   }
 
   // ============================================================
@@ -133,7 +203,6 @@
     });
 
     els.messageInput?.addEventListener('keydown', handleKeydown);
-
     els.inputForm?.addEventListener('submit', handleSubmit);
 
     els.attachBtn?.addEventListener('click', () => els.fileInput?.click());
@@ -156,10 +225,16 @@
     // Keyboard Shortcuts
     document.addEventListener('keydown', handleGlobalKeydown);
 
-    // Close modal on Escape
+    // Close modal/sidebar on Escape
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && state.modalOpen) closeModal();
       if (e.key === 'Escape' && state.sidebarOpen) closeSidebar();
+    });
+
+    // Copy code buttons (delegated)
+    els.messagesList?.addEventListener('click', (e) => {
+      const btn = e.target.closest('.copy-code-btn');
+      if (btn) copyCode(btn);
     });
   }
 
@@ -191,7 +266,6 @@
     els.modalBackdrop?.classList.add('visible');
     document.body.style.overflow = 'hidden';
     els.settingsTrigger?.setAttribute('aria-expanded', 'true');
-    // Focus first input
     setTimeout(() => els.googleKey?.focus(), 100);
   }
 
@@ -220,7 +294,7 @@
   }
 
   // ============================================================
-  // API Key Management (localStorage only)
+  // API Key Management
   // ============================================================
   function loadKeys() {
     const keys = {
@@ -253,6 +327,7 @@
     });
 
     updateKeyStatus();
+    updateModelIndicator();
     showToast(savedCount > 0 ? `${savedCount} key(s) saved successfully` : 'All keys cleared', 'success');
     closeModal();
   }
@@ -292,6 +367,32 @@
   }
 
   // ============================================================
+  // Model Indicator
+  // ============================================================
+  function updateModelIndicator() {
+    if (!els.modelIndicator) return;
+
+    const availableProviders = PROVIDERS.filter(p => localStorage.getItem(p.keyStorage));
+
+    if (availableProviders.length === 0) {
+      els.modelIndicator.innerHTML = `
+        <span class="model-dot" style="background: var(--error);"></span>
+        <span class="model-name">No API Keys</span>
+      `;
+      return;
+    }
+
+    const currentProvider = state.currentProvider || availableProviders[0];
+    els.modelIndicator.innerHTML = `
+      <span class="model-dot"></span>
+      <span class="model-name">${currentProvider.name}</span>
+      <svg class="model-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <polyline points="6 9 12 15 18 9"></polyline>
+      </svg>
+    `;
+  }
+
+  // ============================================================
   // Theme
   // ============================================================
   function loadTheme() {
@@ -306,7 +407,7 @@
   }
 
   // ============================================================
-  // Chat History (UI Only)
+  // Chat History Persistence
   // ============================================================
   function renderChatHistory() {
     if (!els.chatHistory) return;
@@ -389,7 +490,7 @@
     hideWelcomeState();
 
     chat.messages.forEach(msg => {
-      appendMessage(msg.role, msg.content, false);
+      appendMessage(msg.role, msg.content, false, msg.attachments);
     });
 
     scrollToBottom();
@@ -416,8 +517,47 @@
     });
   }
 
+  function saveChat() {
+    if (!state.currentChatId) return;
+
+    const chat = state.chats.find(c => c.id === state.currentChatId);
+    if (!chat) return;
+
+    chat.messages = getCurrentMessages();
+    chat.updatedAt = Date.now();
+    localStorage.setItem('fjai_chats', JSON.stringify(state.chats));
+    renderChatHistory();
+  }
+
+  function getCurrentMessages() {
+    const messages = [];
+    const messageElements = els.messagesList?.querySelectorAll('.message');
+    messageElements?.forEach(el => {
+      const role = el.classList.contains('user') ? 'user' : 'assistant';
+      const bubble = el.querySelector('.message-bubble');
+      const content = bubble?.textContent || bubble?.innerText || '';
+      if (content.trim()) {
+        messages.push({ role, content });
+      }
+    });
+    return messages;
+  }
+
+  function createNewChat(title = 'New Chat') {
+    const chat = {
+      id: generateId(),
+      title,
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    state.chats.unshift(chat);
+    localStorage.setItem('fjai_chats', JSON.stringify(state.chats));
+    return chat;
+  }
+
   // ============================================================
-  // Message Handling (UI Only)
+  // Message Handling
   // ============================================================
   function clearMessages() {
     if (els.messagesList) els.messagesList.innerHTML = '';
@@ -433,7 +573,7 @@
     els.messagesList?.classList.remove('hidden');
   }
 
-  function appendMessage(role, content, animate = true) {
+  function appendMessage(role, content, animate = true, attachments = null) {
     if (!els.messagesList) return;
 
     hideWelcomeState();
@@ -446,10 +586,23 @@
       ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M12 14v8M4 21c0-3.5 2.5-6.5 8-6.5s8 3 8 6.5"></path></svg>'
       : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>';
 
+    let attachmentsHtml = '';
+    if (attachments && attachments.length > 0) {
+      attachmentsHtml = '<div class="message-attachments">' + attachments.map(att => {
+        if (att.type.startsWith('image/')) {
+          return `<img src="${att.data}" alt="${escapeHtml(att.name)}" style="max-width:200px;border-radius:8px;margin-top:8px;">`;
+        } else {
+          return `<div class="file-attachment"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg> ${escapeHtml(att.name)}</div>`;
+        }
+      }).join('') + '</div>';
+    }
+
+    const renderedContent = role === 'assistant' ? renderMarkdown(content) : escapeHtml(content);
+
     messageDiv.innerHTML = `
       <div class="message-avatar">${avatarIcon}</div>
       <div class="message-content">
-        <div class="message-bubble">${renderMarkdown(content)}</div>
+        <div class="message-bubble">${renderedContent}${attachmentsHtml}</div>
         <div class="message-time">${formatTime(Date.now())}</div>
       </div>
     `;
@@ -464,34 +617,32 @@
   }
 
   function renderMarkdown(text) {
-    if (!text) return '';
+    if (!text || typeof marked === 'undefined') return escapeHtml(text);
 
-    return text
-      .replace(/&/g, '&')
-      .replace(/</g, '<')
-      .replace(/>/g, '>')
-      // Code blocks
-      .replace(/```(\w+)?\n([\s\S]*?)```/g, (match, lang, code) => `
-        <pre><code class="language-${lang || ''}">${escapeHtml(code.trim())}</code>
-        <button class="copy-code-btn" data-code="${escapeHtml(code.trim())}" aria-label="Copy code">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-          </svg>
-          <span>Copy</span>
-        </button>
-        </pre>
-      `)
-      // Inline code
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      // Bold
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-      // Italic
-      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-      // Links
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-      // Line breaks
-      .replace(/\n/g, '<br>');
+    try {
+      let html = marked.parse(text);
+
+      // Add copy buttons to code blocks
+      html = html.replace(/<pre><code class="language-(\w*)">([\s\S]*?)<\/code><\/pre>/g, (match, lang, code) => {
+        const escapedCode = escapeHtml(code.trim());
+        return `
+          <pre><code class="language-${lang}">${escapedCode}</code>
+          <button class="copy-code-btn" data-code="${escapedCode}" aria-label="Copy code">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+          </pre>
+        `;
+      });
+
+      return html;
+    } catch (e) {
+      console.error('Markdown parse error:', e);
+      return escapeHtml(text);
+    }
   }
 
   function copyCode(btn) {
@@ -559,7 +710,7 @@
     if (!ta || !btn) return;
     const hasText = ta.value.trim().length > 0;
     const hasFiles = state.attachedFiles.length > 0;
-    btn.disabled = !(hasText || hasFiles);
+    btn.disabled = !(hasText || hasFiles) || state.isStreaming;
   }
 
   function handleKeydown(e) {
@@ -569,62 +720,145 @@
     }
   }
 
-  function handleSubmit(e) {
+  async function handleSubmit(e) {
     e.preventDefault();
     const ta = els.messageInput;
-    if (!ta) return;
+    if (!ta || state.isStreaming) return;
 
     const text = ta.value.trim();
     const hasFiles = state.attachedFiles.length > 0;
 
     if (!text && !hasFiles) return;
 
+    // Check if any API key is configured
+    const hasAnyKey = PROVIDERS.some(p => localStorage.getItem(p.keyStorage));
+    if (!hasAnyKey) {
+      showToast('Please configure at least one API key in Settings', 'error');
+      openModal();
+      return;
+    }
+
+    // Prepare attachments for display
+    const attachmentsForDisplay = state.attachedFiles.map(f => ({
+      name: f.name,
+      type: f.type,
+      data: f.dataUrl || (f.type.startsWith('image/') ? URL.createObjectURL(f) : null),
+    }));
+
     // Add user message
-    appendMessage('user', text || '📎 Attachment(s)');
+    appendMessage('user', text || '📎 Attachment(s)', true, attachmentsForDisplay);
+
+    // Create new chat if needed
+    if (!state.currentChatId) {
+      const firstWords = text.slice(0, 50) || 'Attachment chat';
+      const chat = createNewChat(firstWords + (firstWords.length > 50 ? '...' : ''));
+      state.currentChatId = chat.id;
+    }
 
     // Clear input
     ta.value = '';
     ta.style.height = 'auto';
     updateCharCount();
-    updateSendButton();
+    const filesToSend = [...state.attachedFiles];
     removeAttachment();
+    updateSendButton();
 
-    // Show typing indicator (simulated)
+    // Show typing indicator
     showTypingIndicator();
+    setStreamingState(true);
 
-    // Simulate AI response after delay (placeholder for Part 2)
-    setTimeout(() => {
+    try {
+      const response = await callAPIWithFallback(text, filesToSend);
       hideTypingIndicator();
-      appendMessage('assistant', 'This is a simulated response. API integration coming in Part 2! 🚀');
-    }, 1500);
+      appendMessage('assistant', response.content);
+      saveChat();
+    } catch (error) {
+      hideTypingIndicator();
+      const errorMsg = error.message || 'Unknown error occurred';
+      appendMessage('assistant', `❌ **Error:** ${errorMsg}`);
+      showToast(errorMsg, 'error');
+    } finally {
+      setStreamingState(false);
+    }
+  }
+
+  function setStreamingState(streaming) {
+    state.isStreaming = streaming;
+    els.sendBtn?.classList.toggle('loading', streaming);
+    updateSendButton();
   }
 
   // ============================================================
-  // File Attachment
+  // File Attachment Handling
   // ============================================================
   function handleFileSelect(e) {
     const files = Array.from(e.target.files);
     if (files.length === 0) return;
 
-    // For UI demo, just take first file
+    // Process first file (can extend for multiple)
     const file = files[0];
-    state.attachedFiles = [file];
+    processFile(file).then(processedFile => {
+      state.attachedFiles = [processedFile];
+      showAttachmentPreview(processedFile);
+      updateSendButton();
+    }).catch(err => {
+      showToast('Failed to process file: ' + err.message, 'error');
+    });
 
-    showAttachmentPreview(file);
-    updateSendButton();
-    els.fileInput.value = ''; // Reset for re-selection
+    els.fileInput.value = '';
+  }
+
+  function processFile(file) {
+    return new Promise((resolve, reject) => {
+      const isImage = file.type.startsWith('image/');
+      const isText = file.type.startsWith('text/') || ['.txt', '.js', '.ts', '.json', '.md', '.csv', '.py', '.html', '.css'].some(ext => file.name.endsWith(ext));
+
+      if (!isImage && !isText) {
+        reject(new Error('Unsupported file type. Only images and text files allowed.'));
+        return;
+      }
+
+      if (file.size > 10 * 1024 * 1024) {
+        reject(new Error('File too large. Max size is 10MB.'));
+        return;
+      }
+
+      const reader = new FileReader();
+
+      reader.onload = (e) => {
+        const dataUrl = e.target.result;
+        const textContent = isText ? new TextDecoder('utf-8').decode(reader.result) : null;
+
+        resolve({
+          file,
+          name: file.name,
+          type: file.type,
+          size: file.size,
+          dataUrl,
+          isImage,
+          isText,
+          textContent,
+        });
+      };
+
+      reader.onerror = () => reject(new Error('Failed to read file'));
+
+      if (isImage) {
+        reader.readAsDataURL(file);
+      } else {
+        reader.readAsArrayBuffer(file);
+      }
+    });
   }
 
   function showAttachmentPreview(file) {
-    const isImage = file.type.startsWith('image/');
     const size = formatFileSize(file.size);
 
     els.previewName.textContent = file.name;
     els.previewSize.textContent = size;
 
-    if (isImage) {
-      const url = URL.createObjectURL(file);
-      els.previewThumb.style.backgroundImage = `url(${url})`;
+    if (file.isImage) {
+      els.previewThumb.style.backgroundImage = `url(${file.dataUrl})`;
       els.previewThumb.innerHTML = '';
     } else {
       els.previewThumb.style.backgroundImage = '';
@@ -648,6 +882,163 @@
     els.previewThumb.style.backgroundImage = '';
     els.previewThumb.innerHTML = '';
     updateSendButton();
+  }
+
+  // ============================================================
+  // Multi-Key Fallback API Call
+  // ============================================================
+  async function callAPIWithFallback(userText, attachedFiles) {
+    // Build messages array
+    const messages = buildMessages(userText, attachedFiles);
+
+    // Get available providers with keys
+    const availableProviders = PROVIDERS.filter(p => localStorage.getItem(p.keyStorage));
+
+    if (availableProviders.length === 0) {
+      throw new Error('No API keys configured. Please add keys in Settings.');
+    }
+
+    let lastError = null;
+
+    // Try each provider in order
+    for (const provider of availableProviders) {
+      try {
+        console.log(`[API] Trying ${provider.name}...`);
+        state.currentProvider = provider;
+        updateModelIndicator();
+
+        const content = await callProvider(provider, messages);
+        console.log(`[API] Success with ${provider.name}`);
+
+        return { content, provider: provider.name };
+      } catch (error) {
+        lastError = error;
+        console.warn(`[API] ${provider.name} failed:`, error.message);
+
+        // If it's a rate limit (429) or network error, try next provider
+        if (isRetryableError(error)) {
+          showToast(`${provider.name} unavailable, trying next...`, 'warning');
+          continue;
+        }
+
+        // For other errors (invalid key, etc.), throw immediately
+        throw error;
+      }
+    }
+
+    // All providers failed
+    throw new Error(lastError?.message || 'All API providers failed. Check your keys and limits.');
+  }
+
+  function buildMessages(userText, attachedFiles) {
+    // Get conversation history (last 20 messages for context)
+    const historyMessages = [];
+    const messageElements = els.messagesList?.querySelectorAll('.message');
+    messageElements?.forEach(el => {
+      const role = el.classList.contains('user') ? 'user' : 'assistant';
+      const bubble = el.querySelector('.message-bubble');
+      const content = bubble?.textContent || bubble?.innerText || '';
+      if (content.trim()) {
+        historyMessages.push({ role, content });
+      }
+    });
+
+    // Take last 20 messages for context
+    const contextMessages = historyMessages.slice(-20);
+
+    // Build user message with attachments
+    let userContent = userText;
+
+    if (attachedFiles.length > 0) {
+      const file = attachedFiles[0]; // Handle first file for now
+
+      if (file.isImage) {
+        // Vision format for image
+        userContent = [
+          { type: 'text', text: userText || 'Analyze this image' },
+          { type: 'image_url', image_url: { url: file.dataUrl } },
+        ];
+      } else if (file.isText && file.textContent) {
+        // Text file - prepend content
+        userContent = `${userText || 'Analyze this file'}\n\n--- File: ${file.name} ---\n${file.textContent.slice(0, 50000)}`;
+      }
+    }
+
+    const messages = [
+      { role: 'system', content: 'You are Farhan Jawed AI, a helpful assistant.' },
+      ...contextMessages,
+      { role: 'user', content: userContent },
+    ];
+
+    return messages;
+  }
+
+  async function callProvider(provider, messages) {
+    const apiKey = localStorage.getItem(provider.keyStorage);
+    if (!apiKey) throw new Error(`${provider.name} API key not configured`);
+
+    const requestBody = provider.formatRequest(messages, provider.model);
+
+    const headers = {
+      'Content-Type': 'application/json',
+    };
+
+    // Add authorization header for Groq and OpenRouter
+    if (provider.id === 'groq' || provider.id === 'openrouter') {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+
+    // For Google, add key as query parameter
+    let url = provider.endpoint;
+    if (provider.id === 'google') {
+      url += `?key=${apiKey}`;
+    }
+
+    const controller = new AbortController();
+    state.abortController = controller;
+
+    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 min timeout
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        const errorMsg = data.error?.message || `HTTP ${response.status}`;
+        const error = new Error(errorMsg);
+        error.status = response.status;
+        error.data = data;
+        throw error;
+      }
+
+      const content = provider.extractContent(data);
+      if (!content) throw new Error('Empty response from API');
+
+      return content;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('Request timeout');
+      }
+      throw error;
+    }
+  }
+
+  function isRetryableError(error) {
+    // Retry on: 429 (rate limit), 5xx (server errors), network errors, timeout
+    if (error.status === 429) return true;
+    if (error.status >= 500) return true;
+    if (error.name === 'TypeError' && error.message.includes('fetch')) return true;
+    if (error.message === 'Request timeout') return true;
+    return false;
   }
 
   // ============================================================
@@ -689,7 +1080,6 @@
 
     els.toastContainer.appendChild(toast);
 
-    // Auto remove
     setTimeout(() => {
       toast.classList.add('removing');
       toast.addEventListener('animationend', () => toast.remove());
@@ -713,25 +1103,18 @@
   // Keyboard Shortcuts
   // ============================================================
   function handleGlobalKeydown(e) {
-    // Cmd/Ctrl + K: Focus input
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
       e.preventDefault();
       els.messageInput?.focus();
     }
-
-    // Cmd/Ctrl + N: New chat
     if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
       e.preventDefault();
       newChat();
     }
-
-    // Cmd/Ctrl + ,: Open settings
     if ((e.metaKey || e.ctrlKey) && e.key === ',') {
       e.preventDefault();
       openModal();
     }
-
-    // Slash command (when input not focused)
     if (e.key === '/' && document.activeElement !== els.messageInput) {
       e.preventDefault();
       els.messageInput?.focus();
@@ -769,6 +1152,10 @@
     return `${(bytes / 1048576).toFixed(1)} MB`;
   }
 
+  function generateId() {
+    return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+  }
+
   // ============================================================
   // Start App
   // ============================================================
@@ -787,5 +1174,6 @@
     newChat,
     openModal,
     closeModal,
+    callAPIWithFallback,
   };
 })();
