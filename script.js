@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * Farhan Jawed - AI Agent | script.js
- * Unified FreeLLMAPI Client (via Cloudflare CORS Proxy), Vision/File & Markdown
+ * Unified FreeLLMAPI Client (Live SSE Streaming + auto:fast), Vision & Markdown
  * ============================================================================
  */
 
@@ -24,7 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Unified FreeLLMAPI Server Endpoint via aapka Cloudflare Worker Proxy
   const UNIFIED_API_URL = 'https://freellmapi-proxy.ziprotraders91.workers.dev/v1/chat/completions';
-  const UNIFIED_MODEL_NAME = 'auto';
+  const UNIFIED_MODEL_NAME = 'auto:fast';
 
   // Exact System Prompt (hamesha messages array mein sabse pehle jayega)
   const SYSTEM_PROMPT =
@@ -172,7 +172,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const help = document.getElementById('googleKeyHelp');
       if (help) {
         help.textContent =
-          'Apni FreeLLMAPI Unified Key yahan daalein. Ye key automatic smart routing (70+ models) ke liye use hogi.';
+          'Apni FreeLLMAPI Unified Key yahan daalein. Ye key fast smart routing (auto:fast + live streaming) ke liye use hogi.';
       }
     }
     if (els.googleKey) {
@@ -607,7 +607,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const hasKey = Boolean(state.apiKey);
     const dotColor = hasKey ? '#22c55e' : '#f59e0b';
-    const statusText = hasKey ? 'Configured (model: auto)' : 'Not set';
+    const statusText = hasKey ? 'Configured (auto:fast + stream)' : 'Not set';
 
     els.keyStatus.innerHTML =
       `<div class="key-status-item" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-radius:8px;font-size:0.85rem;">` +
@@ -632,7 +632,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (state.apiKey) {
-      nameEl.textContent = 'FreeLLMAPI (Auto)';
+      nameEl.textContent = 'FreeLLMAPI (Fast)';
       if (dotEl) dotEl.style.backgroundColor = '#22c55e';
     } else {
       nameEl.textContent = 'Add API Key';
@@ -754,7 +754,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /* ==========================================================================
-     10. CHAT MESSAGING & UNIFIED FREELMMAPI CALL
+     10. CHAT MESSAGING & LIVE STREAMING UNIFIED API CALL
      ========================================================================== */
   async function handleSendMessage(overrideText) {
     if (state.isGenerating) return;
@@ -815,14 +815,26 @@ document.addEventListener('DOMContentLoaded', () => {
     scrollToBottom();
 
     const apiMessages = buildApiMessages(chat.messages, attachments);
-    const result = await callUnifiedApi(apiMessages);
+    const streamBubble = createStreamingAssistantController();
+
+    const result = await callUnifiedApiStream(
+      apiMessages,
+      (_piece, fullTextSoFar) => {
+        hideTypingIndicator();
+        streamBubble.update(fullTextSoFar);
+      },
+      (detectedModel) => {
+        updateModelIndicator(detectedModel);
+      }
+    );
 
     hideTypingIndicator();
     setGeneratingState(false);
 
     if (result.success) {
-      const usedModel = result.model || 'FreeLLMAPI (Auto)';
+      const usedModel = result.model || 'FreeLLMAPI (Fast)';
       updateModelIndicator(usedModel);
+      streamBubble.finalize(result.content, usedModel);
 
       const assistantMsg = {
         role: 'assistant',
@@ -835,8 +847,9 @@ document.addEventListener('DOMContentLoaded', () => {
       chat.messages.push(assistantMsg);
       chat.updatedAt = Date.now();
       saveChats();
-      appendMessageToDOM(assistantMsg);
     } else {
+      streamBubble.remove();
+
       const errorMsg = {
         role: 'assistant',
         text: CONNECTION_ERROR_MESSAGE,
@@ -857,9 +870,100 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /**
-   * Sends request to FreeLLMAPI Server (via Cloudflare CORS Proxy)
+   * Live SSE Streaming controller: creates bubble on first token and renders smoothly
    */
-  async function callUnifiedApi(apiMessages) {
+  function createStreamingAssistantController() {
+    let messageEl = null;
+    let markdownDiv = null;
+    let contentWrapper = null;
+    let renderTimer = null;
+    let latestText = '';
+
+    function ensureCreated() {
+      if (messageEl || !els.messagesList) return;
+
+      messageEl = document.createElement('div');
+      messageEl.className = 'message message-assistant assistant';
+
+      const avatarEl = document.createElement('div');
+      avatarEl.className = 'message-avatar';
+      avatarEl.setAttribute('aria-hidden', 'true');
+      avatarEl.innerHTML =
+        '<svg width="18" height="18" viewBox="0 0 32 32" fill="none">' +
+        '<circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2"/>' +
+        '<path d="M10 16c0-3.3 2.7-6 6-6s6 2.7 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+        '<circle cx="16" cy="14" r="1.5" fill="currentColor"/>' +
+        '<circle cx="16" cy="20" r="1.5" fill="currentColor"/></svg>';
+
+      contentWrapper = document.createElement('div');
+      contentWrapper.className = 'message-content';
+
+      const bubbleEl = document.createElement('div');
+      bubbleEl.className = 'message-bubble';
+
+      markdownDiv = document.createElement('div');
+      markdownDiv.className = 'message-markdown';
+
+      bubbleEl.appendChild(markdownDiv);
+      contentWrapper.appendChild(bubbleEl);
+      messageEl.appendChild(avatarEl);
+      messageEl.appendChild(contentWrapper);
+      els.messagesList.appendChild(messageEl);
+    }
+
+    return {
+      update(fullText) {
+        ensureCreated();
+        latestText = fullText;
+        if (renderTimer) return;
+
+        renderTimer = setTimeout(() => {
+          renderTimer = null;
+          if (markdownDiv) {
+            markdownDiv.innerHTML = renderMarkdownSafe(latestText);
+            scrollToBottom();
+          }
+        }, 60);
+      },
+      finalize(finalText, modelLabel) {
+        if (renderTimer) {
+          clearTimeout(renderTimer);
+          renderTimer = null;
+        }
+        ensureCreated();
+        if (markdownDiv) {
+          markdownDiv.innerHTML = renderMarkdownSafe(finalText);
+          enhanceCodeBlocksWithCopy(markdownDiv);
+        }
+        if (contentWrapper && modelLabel) {
+          const existingMeta = contentWrapper.querySelector('.message-meta');
+          if (!existingMeta) {
+            const metaEl = document.createElement('div');
+            metaEl.className = 'message-meta';
+            metaEl.style.cssText = 'font-size:0.75rem;opacity:0.65;margin-top:4px;';
+            metaEl.textContent = modelLabel;
+            contentWrapper.appendChild(metaEl);
+          }
+        }
+        scrollToBottom();
+      },
+      remove() {
+        if (renderTimer) {
+          clearTimeout(renderTimer);
+          renderTimer = null;
+        }
+        if (messageEl && messageEl.parentNode) {
+          messageEl.parentNode.removeChild(messageEl);
+        }
+        messageEl = null;
+      }
+    };
+  }
+
+  /**
+   * Streams tokens from FreeLLMAPI ("auto:fast" with fallback to "auto")
+   */
+  async function callUnifiedApiStream(apiMessages, onToken, onModelDetected) {
     const apiKey = (state.apiKey || '').trim();
 
     if (!apiKey) {
@@ -869,69 +973,224 @@ document.addEventListener('DOMContentLoaded', () => {
       };
     }
 
-    try {
-      const headers = {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      };
+    const modelsToTry = [UNIFIED_MODEL_NAME, 'auto'];
+    let lastErrorDetails = '';
 
-      const response = await fetch(UNIFIED_API_URL, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: UNIFIED_MODEL_NAME,
-          messages: apiMessages,
-          temperature: 0.7
-        })
-      });
+    for (let attempt = 0; attempt < modelsToTry.length; attempt++) {
+      const modelToUse = modelsToTry[attempt];
 
-      if (!response.ok) {
-        let serverMessage = '';
-        try {
-          const rawText = await response.text();
+      try {
+        const response = await fetch(UNIFIED_API_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream, application/json',
+            'Authorization': `Bearer ${apiKey}`
+          },
+          body: JSON.stringify({
+            model: modelToUse,
+            messages: apiMessages,
+            temperature: 0.7,
+            stream: true
+          })
+        });
+
+        if (!response.ok) {
+          let serverMessage = '';
           try {
-            const errJson = JSON.parse(rawText);
-            serverMessage =
-              (errJson && errJson.error && errJson.error.message) ||
-              (errJson && errJson.message) ||
-              (errJson && errJson.detail) ||
-              rawText;
+            const rawText = await response.text();
+            try {
+              const errJson = JSON.parse(rawText);
+              serverMessage =
+                (errJson && errJson.error && errJson.error.message) ||
+                (errJson && errJson.message) ||
+                (errJson && errJson.detail) ||
+                rawText;
+            } catch {
+              serverMessage = rawText;
+            }
           } catch {
-            serverMessage = rawText;
+            serverMessage = '';
           }
-        } catch {
-          serverMessage = '';
+
+          const cleanMsg = String(serverMessage || '').replace(/<[^>]*>/g, '').trim().slice(0, 220);
+          lastErrorDetails = `Details: HTTP ${response.status}${cleanMsg ? ' - ' + cleanMsg : ''}`;
+
+          if (attempt === 0 && (response.status === 400 || response.status === 404)) {
+            continue;
+          }
+
+          return { success: false, details: lastErrorDetails };
         }
 
-        const cleanMsg = String(serverMessage || '').replace(/<[^>]*>/g, '').trim().slice(0, 220);
+        const contentType = (response.headers.get('content-type') || '').toLowerCase();
+
+        // Fallback if server sends normal JSON instead of SSE stream
+        if (
+          contentType.includes('application/json') ||
+          !response.body ||
+          typeof response.body.getReader !== 'function'
+        ) {
+          const data = await response.json();
+          const content = extractAssistantText(data);
+          if (!content) {
+            return {
+              success: false,
+              details: 'Details: Server ne empty response bheja.'
+            };
+          }
+          const modelName = (data && typeof data.model === 'string' && data.model) || modelToUse;
+          if (typeof onModelDetected === 'function') onModelDetected(modelName);
+          if (typeof onToken === 'function') onToken(content, content);
+          return { success: true, content, model: modelName };
+        }
+
+        // Read SSE stream chunk-by-chunk
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        let rawFallbackBuffer = '';
+        let fullContent = '';
+        let detectedModel = '';
+        let sawSseDataLine = false;
+        let streamErrorMsg = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunkText = decoder.decode(value, { stream: true });
+          buffer += chunkText;
+          rawFallbackBuffer += chunkText;
+
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const rawLine of lines) {
+            const line = rawLine.replace(/\r$/, '').trim();
+            if (!line || line.startsWith(':')) continue;
+
+            if (line.startsWith('data:')) {
+              sawSseDataLine = true;
+              const dataStr = line.slice(5).trim();
+              if (!dataStr || dataStr === '[DONE]') continue;
+
+              try {
+                const parsed = JSON.parse(dataStr);
+
+                if (parsed && parsed.error && parsed.error.message) {
+                  streamErrorMsg = parsed.error.message;
+                  continue;
+                }
+
+                if (parsed && typeof parsed.model === 'string' && parsed.model && !detectedModel) {
+                  detectedModel = parsed.model;
+                  if (typeof onModelDetected === 'function') {
+                    onModelDetected(detectedModel);
+                  }
+                }
+
+                const delta =
+                  parsed &&
+                  Array.isArray(parsed.choices) &&
+                  parsed.choices[0] &&
+                  parsed.choices[0].delta &&
+                  typeof parsed.choices[0].delta.content === 'string'
+                    ? parsed.choices[0].delta.content
+                    : '';
+
+                const messageFallback =
+                  !delta &&
+                  parsed &&
+                  Array.isArray(parsed.choices) &&
+                  parsed.choices[0] &&
+                  parsed.choices[0].message &&
+                  typeof parsed.choices[0].message.content === 'string'
+                    ? parsed.choices[0].message.content
+                    : '';
+
+                const piece = delta || messageFallback;
+                if (piece) {
+                  fullContent += piece;
+                  if (typeof onToken === 'function') {
+                    onToken(piece, fullContent);
+                  }
+                }
+              } catch {
+                // Ignore incomplete SSE JSON line
+              }
+            }
+          }
+        }
+
+        const tail = decoder.decode();
+        if (tail) buffer += tail;
+        if (buffer.trim().startsWith('data:')) {
+          sawSseDataLine = true;
+          const dataStr = buffer.trim().slice(5).trim();
+          if (dataStr && dataStr !== '[DONE]') {
+            try {
+              const parsed = JSON.parse(dataStr);
+              const piece =
+                (parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].delta && parsed.choices[0].delta.content) ||
+                (parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].message && parsed.choices[0].message.content) ||
+                '';
+              if (piece) {
+                fullContent += piece;
+                if (typeof onToken === 'function') onToken(piece, fullContent);
+              }
+            } catch {
+              // Ignore trailing parse error
+            }
+          }
+        }
+
+        if (!sawSseDataLine && !fullContent && rawFallbackBuffer.trim().startsWith('{')) {
+          try {
+            const jsonFallback = JSON.parse(rawFallbackBuffer.trim());
+            const text = extractAssistantText(jsonFallback);
+            if (text) {
+              fullContent = text;
+              detectedModel = jsonFallback.model || detectedModel;
+              if (typeof onModelDetected === 'function' && detectedModel) {
+                onModelDetected(detectedModel);
+              }
+              if (typeof onToken === 'function') onToken(text, text);
+            } else if (jsonFallback && jsonFallback.error && jsonFallback.error.message) {
+              streamErrorMsg = jsonFallback.error.message;
+            }
+          } catch {
+            // Ignore
+          }
+        }
+
+        if (!fullContent) {
+          return {
+            success: false,
+            details: streamErrorMsg
+              ? `Details: ${streamErrorMsg}`
+              : 'Details: Server ne empty response bheja.'
+          };
+        }
+
+        return {
+          success: true,
+          content: fullContent,
+          model: detectedModel || `FreeLLMAPI (${modelToUse})`
+        };
+      } catch (err) {
+        const msg = err && err.message ? err.message : 'Network error';
         return {
           success: false,
-          details: `Details: HTTP ${response.status}${cleanMsg ? ' - ' + cleanMsg : ''}`
+          details: `Details: ${msg}`
         };
       }
-
-      const data = await response.json();
-      const content = extractAssistantText(data);
-
-      if (!content) {
-        return {
-          success: false,
-          details: 'Details: Server ne empty response bheja (choices empty).'
-        };
-      }
-
-      return {
-        success: true,
-        content,
-        model: (data && typeof data.model === 'string' && data.model) || 'FreeLLMAPI (Auto)'
-      };
-    } catch (err) {
-      const msg = err && err.message ? err.message : 'Network error';
-      return {
-        success: false,
-        details: `Details: ${msg}`
-      };
     }
+
+    return {
+      success: false,
+      details: lastErrorDetails || 'Details: Unknown error'
+    };
   }
 
   function handleSlashCommand(cmd) {
