@@ -1433,3 +1433,38 @@ body {
   .messages-container { overflow: visible; height: auto; }
   body { background: white; color: black; height: auto; overflow: visible; }
 }
+/* ===== FINAL LAYOUT FIX ===== */
+html, body {
+    height: 100% !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+}
+.app-shell {
+    display: flex !important;
+    flex-direction: column !important;
+    height: 100dvh !important; /* Mobile full screen */
+    width: 100% !important;
+}
+.main-content {
+    display: flex !important;
+    flex-direction: column !important;
+    height: 100% !important;
+    width: 100% !important;
+    overflow: hidden !important;
+}
+.chat-window {
+    display: flex !important;
+    flex-direction: column !important;
+    flex: 1 !important;
+    overflow: hidden !important;
+}
+.messages-container {
+    flex: 1 !important;
+    overflow-y: auto !important;
+    padding-bottom: 20px !important;
+}
+.input-area {
+    margin-top: auto !important;
+    flex-shrink: 0 !important;
+    padding-bottom: env(safe-area-inset-bottom) !important;
+}
